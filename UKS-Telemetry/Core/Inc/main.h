@@ -57,6 +57,17 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define AC_L_STOP_Pin GPIO_PIN_0
+#define AC_L_STOP_GPIO_Port GPIOA
+#define AC_L_STOP_EXTI_IRQn EXTI0_IRQn
+#define LORA_TX_Pin GPIO_PIN_2
+#define LORA_TX_GPIO_Port GPIOA
+#define LORA_RX_Pin GPIO_PIN_3
+#define LORA_RX_GPIO_Port GPIOA
+#define EKRAN_TX_Pin GPIO_PIN_9
+#define EKRAN_TX_GPIO_Port GPIOA
+#define EKRAN_RX_Pin GPIO_PIN_10
+#define EKRAN_RX_GPIO_Port GPIOA
 
 /* USER CODE BEGIN Private defines */
 
