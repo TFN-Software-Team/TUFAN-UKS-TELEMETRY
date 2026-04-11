@@ -1,0 +1,66 @@
+# Build artifacts
+*.o
+*.d
+*.elf
+*.hex
+*.bin
+*.map
+*.list
+*.a
+
+# Build directories
+Debug/
+Release/
+build/
+Build/
+
+# STM32CubeIDE / Eclipse
+.cproject
+.project
+.settings/
+.metadata/
+
+# STM32CubeMX
+*.mxproject
+*.mxproject.user
+
+# Temporary files
+*~
+*.tmp
+*.swp
+*.bak
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.suo
+*.user
+*.aps
+*.pch
+*.vspscc
+*_i.c
+*_p.c
+*.ncb
+*.suo
+*.tlb
+*.tlh
+*.tmp
+*.tmp_proj
+*.log
+*.vspscc
+*.vssscc
+.build
+*.dep
+
+# Other
+*.log
+*.out
