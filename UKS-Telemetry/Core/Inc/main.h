@@ -3,7 +3,17 @@
   ******************************************************************************
   * @file           : main.h
   * @brief          : Header for main.c file.
-  *                   This file contains the common defines of the application.
+  *                   UKS - Uzaktan Kontrol Sistemi pin tanimlari
+  *
+  *  Pin haritasi (STM32F103):
+  *    PA0         -> AC_L_STOP    (Acil stop butonu, EXTI falling, pull-up)
+  *    PA2 / PA3   -> USART2 TX/RX -> LoRa E32 modulu           (115200 baud)
+  *    PA9 / PA10  -> USART1 TX/RX -> Ekran / Seri monitor      (9600 baud)
+  *    PB10        -> LORA_AUX     (E32 busy/ready, input pull-up)
+  *    PB11        -> MOTOR_EN     (Durum cikisi: HIGH=nominal, LOW=E-STOP)
+  *
+  *  NOT: E32 modulunun M0 ve M1 pinleri donanimsal olarak GND'ye baglidir
+  *  (kalici Normal mod). Bu nedenle STM32 tarafindan kontrol edilmezler.
   ******************************************************************************
   * @attention
   *
@@ -70,6 +80,25 @@ void Error_Handler(void);
 #define EKRAN_RX_GPIO_Port GPIOA
 
 /* USER CODE BEGIN Private defines */
+
+/* ----------------------------------------------------------------------------
+ *  LoRa E32-433T30D status pini (AUX)
+ *  lora.h bu define'lari ZORUNLU kabul eder; yoksa compile hatasi verir.
+ *
+ *  E32'nin M0 ve M1 pinleri donanimda GND'ye baglanmistir (kalici Normal mod)
+ *  — bu yuzden STM32 tarafinda tanimlanmalari gerekmiyor.
+ *
+ *  Bu blok "USER CODE" icinde oldugu icin CubeMX regenerate sonrasinda
+ *  korunacaktir.
+ * -------------------------------------------------------------------------- */
+
+/* E32 AUX: modul hazir iken HIGH, TX/boot sirasinda LOW. Input + pull-up. */
+#define LORA_AUX_Pin         GPIO_PIN_10
+#define LORA_AUX_GPIO_Port   GPIOB
+
+/* Durum cikisi (role / LED): HIGH=nominal, LOW=E-STOP aktif */
+#define MOTOR_EN_Pin         GPIO_PIN_11
+#define MOTOR_EN_GPIO_Port   GPIOB
 
 /* USER CODE END Private defines */
 
