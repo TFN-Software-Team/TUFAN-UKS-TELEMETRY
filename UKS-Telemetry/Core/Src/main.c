@@ -1,48 +1,80 @@
 /* USER CODE BEGIN Header */
 /**
-  **************************
+  ******************************************************************************
   * @file           : main.c
   * @brief          : Yer Istasyonu (UKS) — Teşhis ve UART Test Versiyonu
-  **************************
+  * [CLEANUP] LoRa/Telemetry dependencies removed from E-Stop for stable local button testing.
+  ******************************************************************************
   */
 /* USER CODE END Header */
 
 #include "main.h"
 #include "telemetry.h"
-#include "lora.h"
+// #include "lora.h" // [CLEANUP] Lora header included only when needed
 #include <stdio.h>
 #include <string.h>
 
 /* Donanım Handle'ları */
 UART_HandleTypeDef huart1;
-UART_HandleTypeDef huart2;
+UART_HandleTypeDef huart2; // Keep huart2 definition for completeness, but minimize use
 
 /* Sistem Değişkenleri */
-static TelCtx_t    tel_ctx;
-static LoraCtx_t   lora_ctx;
+TelCtx_t    tel_ctx;     // Sadece bu dosyada değil, lora.c'den de erişilebilir olmalı
+// static LoraCtx_t   lora_ctx; // [CLEANUP] If no LoRa module is connected, remove this definition.
 static uint32_t    last_heartbeat_ms = 0;
-
-/* Buton olay bayrağı — ISR içinden set edilir */
-static volatile uint8_t button_pressed_flag = 0;
-static uint32_t last_button_press_ms = 0;
+static uint32_t    last_button_press = 0; // Debounce için
 
 /* Fonksiyon Prototipleri */
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
-static void Task_Button(void);
 
-/* * ÖNEMLİ: Makefile ve VS Code (GCC) için printf yönlendirmesi.
- * Bu fonksiyon printf'in karakterlerini huart1 üzerinden gönderir.
- */
+/* ====================================================================
+ * GCC (VS Code vb.) için printf yönlendirmesi.
+ * printf kullanıldığında karakterler USART1 (Ekran) üzerinden yollanır.
+ * ==================================================================== */
 int _write(int file, char *ptr, int len)
 {
-    // EKRAN (Monitor) USART1 kullanıyor
     if (HAL_UART_Transmit(&huart1, (uint8_t *)ptr, (uint16_t)len, 100) != HAL_OK) {
         return -1;
     }
     return len;
+}
+
+/* ====================================================================
+ * KESME (INTERRUPT) YÖNETİMİ: ACİL DURDURMA (E-STOP)
+ * [FIXED] LoRa bağımlılığı kaldırıldı. Sadece donanım ve monitor çıktısı kalacak.
+ * ==================================================================== */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    // E-STOP Butonuna basıldı mı? (PA0)
+    if (GPIO_Pin == AC_L_STOP_Pin)
+    {
+        uint32_t now = HAL_GetTick();
+
+        // Debounce Kontrolü
+        if (now - last_button_press > 200) // 200ms Debounce
+        {
+            last_button_press = now;
+            
+            // 1. Motor durum pinini LOW yap (Donanımsal kesme)
+            HAL_GPIO_WritePin(MOTOR_EN_GPIO_Port, MOTOR_EN_Pin, GPIO_PIN_RESET);
+            
+            // ****************************************************
+            // [FIXED] LoRa üzerinden E-STOP komutu gönderme kısmı kaldırıldı/yorumlandı. 
+            // Çünkü huart2 bağlı değilken bu işlem başarısızlığa yol açıyordu.
+            // uint8_t estop_buf[TEL_ESTOP_BURST_MAX_LEN];
+            // uint8_t len = Telemetry_EncodeEStopBurst(estop_buf, sizeof(estop_buf));
+            // HAL_UART_Transmit(&huart2, estop_buf, len, 100);
+            // ****************************************************
+
+            // 3. Bilgisayar ekranına acil durumu bas (Monitor)
+            printf("\r\n========================================\r\n");
+            printf("!!! YER ISTASYONUNDAN E-STOP BASILDI !!!\r\n");
+            printf("========================================\r\n\n");
+        }
+    }
 }
 
 /**
@@ -55,37 +87,27 @@ int main(void)
 
   /* Donanım Başlatma */
   MX_GPIO_Init();
-  MX_USART1_UART_Init();   /* Monitor: 9600 Baud */
-  MX_USART2_UART_Init();   /* LoRa: 115200 Baud */
+  MX_USART1_UART_Init();   /* Monitor: 115200 Baud (PC Ekranı) */
+  MX_USART2_UART_Init();   /* LoRa: 9600 Baud (Physical port setup kept for completeness) */
 
   /* USER CODE BEGIN 2 */
   
-  /* * 1. ADIM: GCC İÇİN KRİTİK AYAR
-   * printf tamponlamasını kapatıyoruz. Bu satır olmazsa seri monitör boş kalabilir.
-   */
+  /* printf tamponlamasını kapatıyoruz. (Anında ekrana basılması için) */
   setvbuf(stdout, NULL, _IONBF, 0);
 
-  /* * 2. ADIM: DONANIM TESTİ (printf'ten bağımsız)
-   * Eğer bu mesaj gelmiyorsa kablo bağlantısı veya baud rate (9600) hatalıdır.
-   */
-  char *raw_msg = "\r\n>>> UKS SISTEM CALISIYOR (DONANIM TESTI OK) <<<\r\n";
-  HAL_UART_Transmit(&huart1, (uint8_t *)raw_msg, strlen(raw_msg), 500);
-
-  /* 3. ADIM: PRINTF TESTİ */
-  printf("Sistem Baslatiliyor (printf OK)...\r\n");
+  /* DONANIM TESTİ: Cihaz açılış mesajı */
+  printf("\r\n>>> UKS YER ISTASYONU BASLATILIYOR (Guvende / LoRa Devre Disi) <<<\r\n");
 
   /* Modül Başlatmaları */
   Telemetry_Init(&tel_ctx);
   
-  // LoRa bağlı değilse Lora_Init timeout dönecektir.
+  /* [CLEANUP] LoRa modülü test aşamasında kilitlenmeleri önlemek için tamamen yoruma alındı.
   LoraStatus_t ls = Lora_Init(&lora_ctx, &huart2);
-  
   if (ls == LORA_OK) {
-      printf("[OK] LoRa Hazir.\r\n");
-      Lora_StartReceive(&lora_ctx);
-  } else {
-      printf("[UYARI] LoRa Donanimi Tespit Edilemedi (Status: %d)\r\n", ls);
+      printf("[OK] LoRa Hazir ve Dinlemede.\r\n");
+      Lora_StartReceive(&lora_ctx); 
   }
+  */
 
   /* USER CODE END 2 */
 
@@ -94,62 +116,33 @@ int main(void)
   {
     uint32_t now = HAL_GetTick();
 
-    /* * KALP ATIŞI: Her 2 saniyede bir mesaj göndererek sistemin 
-     * kilitlenmediğini ve UART'ın açık olduğunu teyit eder.
-     */
-    if (now - last_heartbeat_ms >= 2000) {
+    /* 1. KALP ATIŞI (Heartbeat) - Sistemin donup donmadığını kontrol eder */
+    if (now - last_heartbeat_ms >= 3000) { 
         last_heartbeat_ms = now;
-        
-        // Hem ham veri hem printf ile test
-        HAL_UART_Transmit(&huart1, (uint8_t *)"HEARTBEAT_HAL\r\n", 15, 10);
-        printf("HEARTBEAT_PRINTF - Zaman: %lu ms\r\n", now);
+        printf("[SISTEM] Heartbeat - %lu ms\r\n", now);
     }
 
-    /* Diğer Görevler */
+    /* 2. TELEMETRİ ZAMANLAYICISI (Timeout Kontrolleri İçin) */
     Telemetry_Tick(&tel_ctx, now);
-    
-    Task_Button(); // Buton olaylarını işle
-    //Task_Rx();     // Gelen verileri parse et
+
+    /* 3. LORA'DAN VERİ GELDİ Mİ? 
+       (LoRa kesmesi kapalı olduğu için buraya şimdilik hiç girmeyecek, ama kod yapısını koruyoruz) */
+    if (Telemetry_IsFrameReady(&tel_ctx)) 
+    {
+        TelData_t incoming_data;
+        TelStatus_t status = Telemetry_Parse(&tel_ctx, &incoming_data);
+        Telemetry_PrintDashboard(&incoming_data, status, Telemetry_IsEStopActive(&tel_ctx));
+    }
   }
 }
 
 /**
-  * @brief  EXTI kesme callback'i — HAL tarafından otomatik çağrılır.
-  *         Butona basıldığında sadece bayrağı set eder (ISR'de printf YOK!).
-  */
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
-{
-    if (GPIO_Pin == AC_L_STOP_Pin) {
-        button_pressed_flag = 1;
-    }
-}
-
-/**
-  * @brief  Buton görevi — ana döngüde çağrılır.
-  *         Bayrak set olduysa terminale mesaj yazar, 200 ms debounce uygular.
-  */
-static void Task_Button(void)
-{
-    if (button_pressed_flag) {
-        uint32_t now = HAL_GetTick();
-
-        /* Debounce: mekanik sıçramayı filtrele */
-        if (now - last_button_press_ms >= 200) {
-            last_button_press_ms = now;
-            printf(">>> BUTONA BASILDI! (Zaman: %lu ms)\r\n", now);
-        }
-
-        button_pressed_flag = 0;
-    }
-}
-
-/**
-  * @brief USART1 Initialization Function (Monitor)
+  * @brief USART1 Initialization Function (Monitor / PC Ekranı)
   */
 static void MX_USART1_UART_Init(void)
 {
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 9600;
+  huart1.Init.BaudRate = 9600; // Ekran hızı 9600
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
@@ -163,12 +156,12 @@ static void MX_USART1_UART_Init(void)
 }
 
 /**
-  * @brief USART2 Initialization Function (LoRa)
+  * @brief USART2 Initialization Function (LoRa Modülü)
   */
 static void MX_USART2_UART_Init(void)
 {
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 115200;
+  huart2.Init.BaudRate = 115200; // LoRa E32 modülünün varsayılan hızı
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;
@@ -192,62 +185,62 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
-  /* Acil Stop Butonu */
+  /* Motor Durum Çıkışı (PB11) (Başlangıçta Yüksek/Aktif) */
+  HAL_GPIO_WritePin(MOTOR_EN_GPIO_Port, MOTOR_EN_Pin, GPIO_PIN_SET);
+
+  /* PA0 Acil Stop Butonu (EXTI) Olarak Tekrar Ayarlandı */
   GPIO_InitStruct.Pin = AC_L_STOP_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(AC_L_STOP_GPIO_Port, &GPIO_InitStruct);
 
-  /* Motor Durum Çıkışı */
-  HAL_GPIO_WritePin(MOTOR_EN_GPIO_Port, MOTOR_EN_Pin, GPIO_PIN_SET);
+  /* Motor Durum Çıkışı Pin Ayarları */
   GPIO_InitStruct.Pin = MOTOR_EN_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(MOTOR_EN_GPIO_Port, &GPIO_InitStruct);
 
-  /* EXTI Kesme Aktifleştirme — Acil Stop Butonu
-   * NOT: IRQ adını pin numarasına göre ayarla:
-   *   Pin 0      -> EXTI0_IRQn
-   *   Pin 1      -> EXTI1_IRQn
-   *   Pin 2      -> EXTI2_IRQn
-   *   Pin 3      -> EXTI3_IRQn
-   *   Pin 4      -> EXTI4_IRQn
-   *   Pin 5..9   -> EXTI9_5_IRQn
-   *   Pin 10..15 -> EXTI15_10_IRQn
-   */
-  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 2, 0);
-  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+  /* EXTI kesmesini aktif et (Acil Stop için) */
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
 }
 
+/* ====================================================================
+ * DÜZELTİLMİŞ SAAT AYARLARI: HSI (Dahili Osilatör - 64 MHz)
+ * Dış kristale (HSE) bağımlılığı tamamen kaldırır ve sistemi kilitlenmekten kurtarır.
+ * ==================================================================== */
 void SystemClock_Config(void)
 {
-  /* Standart HSE 72MHz Ayarları */
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
-  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
-  RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
-  HAL_RCC_OscConfig(&RCC_OscInitStruct);
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI_DIV2;
+  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL16; // 4MHz * 16 = 64 MHz
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK|RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
-  HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2);
-}
 
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
 
 void Error_Handler(void)
 {
   __disable_irq();
   while (1) {}
-
-  
 }
