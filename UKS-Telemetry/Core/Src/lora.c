@@ -1,157 +1,84 @@
-/**
- * @file    lora.c
- * @brief   Ebyte E32-433T30D surucusu — implementasyon.
- *
- *  NOT: M0 ve M1 donanimda GND'ye bagli oldugundan modul daima Normal
- *  modda calisir; STM32 bu pinleri kontrol etmez. Burada yalnizca AUX
- *  okunur ve UART TX/RX yonetilir.
- */
-
 #include "lora.h"
-#include <string.h>
-
-/* ========== Dahili Yardimcilar ========== */
-
-/** AUX GPIO'sunu input pull-up olarak konfigure et. Clock enable OLMALI. */
-static void E32_InitAuxGPIO(void)
-{
-    GPIO_InitTypeDef g = {0};
-
-    /* AUX: input, pull-up (modul disconnect olursa pin float etmesin) */
-    g.Mode  = GPIO_MODE_INPUT;
-    g.Pull  = GPIO_PULLUP;
-    g.Speed = GPIO_SPEED_FREQ_LOW;
-    g.Pin   = LORA_AUX_Pin;
-    HAL_GPIO_Init(LORA_AUX_GPIO_Port, &g);
-}
-
-static inline uint8_t Lora_HandleMatches(const LoraCtx_t *ctx,
-                                          const UART_HandleTypeDef *h)
-{
-    return (ctx && ctx->initialized && ctx->huart == h);
-}
-
-/* ========== API ========== */
 
 LoraStatus_t Lora_Init(LoraCtx_t *ctx, UART_HandleTypeDef *huart)
 {
-    if (!ctx || !huart) return LORA_ERR_NULL;
-
-    memset(ctx, 0, sizeof(*ctx));
-    ctx->huart = huart;
-
-    E32_InitAuxGPIO();
-
-    /* Modul boot'u tamamlasin — AUX HIGH olmali. Boot sirasinda
-     * AUX tahminen LOW'da, 170ms icinde HIGH'a cikar. */
-    uint32_t start = HAL_GetTick();
-    while (HAL_GPIO_ReadPin(LORA_AUX_GPIO_Port, LORA_AUX_Pin) == GPIO_PIN_RESET)
-    {
-        if ((HAL_GetTick() - start) > LORA_E32_BOOT_MS)
-        {
-            /* Modul cevap vermiyor — yine de initialized say, kullanici
-             * loglayip devam edebilir. Donanim baglantisini kontrol et. */
-            ctx->initialized = 1;
-            return LORA_ERR_TIMEOUT;
-        }
-    }
-
-    ctx->initialized = 1;
+    if (!ctx || !huart) return LORA_ERR;
+    
+    ctx->huart   = huart;
+    ctx->rx_cb   = NULL;
+    ctx->rx_user = NULL;
+    
+    /* If you have an AUX pin wired to the STM32 to check E32 status, 
+       you can add a short delay or check here. For now, assume OK. */
+    
     return LORA_OK;
 }
 
-void Lora_SetRxByteHandler(LoraCtx_t *ctx, LoraRxByteFn_t cb, void *user)
+void Lora_SetRxByteHandler(LoraCtx_t *ctx, LoraRxCb_t cb, void *user)
 {
     if (!ctx) return;
-    ctx->rx_cb      = cb;
-    ctx->rx_cb_user = user;
+    ctx->rx_cb   = cb;
+    ctx->rx_user = user;
 }
 
 LoraStatus_t Lora_StartReceive(LoraCtx_t *ctx)
 {
-    if (!ctx || !ctx->initialized) return LORA_ERR_NOT_INIT;
-
-    HAL_StatusTypeDef hs = HAL_UART_Receive_IT(ctx->huart, &ctx->rx_byte, 1);
-    if (hs != HAL_OK)
+    if (!ctx || !ctx->huart) return LORA_ERR;
+    
+    /* Start listening for the very first byte via UART Interrupt */
+    if (HAL_UART_Receive_IT(ctx->huart, &ctx->rx_byte_buf, 1) != HAL_OK)
     {
-        return (hs == HAL_BUSY) ? LORA_ERR_BUSY : LORA_ERR_TX;
+        return LORA_ERR;
     }
+    
     return LORA_OK;
 }
 
 LoraStatus_t Lora_Send(LoraCtx_t *ctx, const uint8_t *data, uint16_t len)
 {
-    if (!ctx || !data)         return LORA_ERR_NULL;
-    if (!ctx->initialized)     return LORA_ERR_NOT_INIT;
-    if (len == 0)              return LORA_OK;
+    if (!ctx || !ctx->huart || !data) return LORA_ERR;
+    
+    /* Optional: If you mapped the E32 AUX pin, read it here 
+       and wait for it to go HIGH before transmitting. */
 
-    /* Oncelikle modulun hazir olmasini bekle. E32 onceki RF TX'i
-     * bitirmeden yeni paket almaz/iletmez; burst'lerde bu kritik. */
-    LoraStatus_t ws = Lora_WaitReady(ctx, LORA_E32_TX_WAIT_MS);
-    if (ws != LORA_OK)
+    if (HAL_UART_Transmit(ctx->huart, (uint8_t*)data, len, 1000) != HAL_OK)
     {
-        ctx->stats.tx_fails++;
-        ctx->stats.aux_timeouts++;
-        return ws;
+        return LORA_ERR;
     }
-
-    HAL_StatusTypeDef hs = HAL_UART_Transmit(ctx->huart,
-                                             (uint8_t *)data, len,
-                                             LORA_TX_TIMEOUT_MS);
-    if (hs != HAL_OK)
-    {
-        ctx->stats.tx_fails++;
-        return (hs == HAL_TIMEOUT) ? LORA_ERR_TIMEOUT : LORA_ERR_TX;
-    }
-
-    ctx->stats.tx_bytes += len;
+    
     return LORA_OK;
 }
 
 void Lora_OnUartRxCplt(LoraCtx_t *ctx, UART_HandleTypeDef *huart)
 {
-    if (!Lora_HandleMatches(ctx, huart)) return;
-
-    ctx->stats.rx_bytes++;
-
-    if (ctx->rx_cb)
+    if (!ctx) return;
+    
+    /* Ensure the interrupt belongs to the LoRa UART */
+    if (ctx->huart == huart)
     {
-        ctx->rx_cb(ctx->rx_byte, HAL_GetTick(), ctx->rx_cb_user);
+        /* Pass the received byte to the main.c / telemetry parser */
+        if (ctx->rx_cb)
+        {
+            ctx->rx_cb(ctx->rx_byte_buf, HAL_GetTick(), ctx->rx_user);
+        }
+        
+        /* Re-arm the UART interrupt to listen for the next byte */
+        HAL_UART_Receive_IT(ctx->huart, &ctx->rx_byte_buf, 1);
     }
-
-    (void)HAL_UART_Receive_IT(ctx->huart, &ctx->rx_byte, 1);
 }
 
 void Lora_OnUartError(LoraCtx_t *ctx, UART_HandleTypeDef *huart)
 {
-    if (!Lora_HandleMatches(ctx, huart)) return;
-
-    ctx->stats.rx_errors++;
-    (void)HAL_UART_Receive_IT(ctx->huart, &ctx->rx_byte, 1);
-}
-
-uint8_t Lora_IsBusy(const LoraCtx_t *ctx)
-{
-    (void)ctx;
-    return (HAL_GPIO_ReadPin(LORA_AUX_GPIO_Port, LORA_AUX_Pin) == GPIO_PIN_RESET);
-}
-
-LoraStatus_t Lora_WaitReady(const LoraCtx_t *ctx, uint32_t timeout_ms)
-{
-    uint32_t start = HAL_GetTick();
-    while (Lora_IsBusy(ctx))
+    if (!ctx) return;
+    
+    if (ctx->huart == huart)
     {
-        if ((HAL_GetTick() - start) > timeout_ms) return LORA_ERR_TIMEOUT;
+        /* Clear Overrun/Noise errors to prevent the interrupt from getting stuck */
+        __HAL_UART_CLEAR_OREFLAG(huart);
+        __HAL_UART_CLEAR_NEFLAG(huart);
+        __HAL_UART_CLEAR_FEFLAG(huart);
+        
+        /* Re-arm the UART interrupt */
+        HAL_UART_Receive_IT(ctx->huart, &ctx->rx_byte_buf, 1);
     }
-    return LORA_OK;
-}
-
-const LoraStats_t *Lora_GetStats(const LoraCtx_t *ctx)
-{
-    return ctx ? &ctx->stats : NULL;
-}
-
-void Lora_ResetStats(LoraCtx_t *ctx)
-{
-    if (ctx) memset(&ctx->stats, 0, sizeof(ctx->stats));
 }
