@@ -1,48 +1,84 @@
 #include "lora.h"
-#include "telemetry.h"
 
-#define LORA_RX_BUF_SIZE 64
-
-// DMA'nın verileri doğrudan yazacağı tampon
-uint8_t lora_dma_rx_buf[LORA_RX_BUF_SIZE];
-
-// main.c dosyasında oluşturduğumuz telemetri değişkenine (tel_ctx) dışarıdan erişim
-extern TelCtx_t tel_ctx; 
-
-LoraStatus_t Lora_Init(LoraCtx_t *ctx, UART_HandleTypeDef *huart) 
+LoraStatus_t Lora_Init(LoraCtx_t *ctx, UART_HandleTypeDef *huart)
 {
-    if (!ctx || !huart) return LORA_ERR_UART;
+    if (!ctx || !huart) return LORA_ERR;
     
-    ctx->huart = huart;
+    ctx->huart   = huart;
+    ctx->rx_cb   = NULL;
+    ctx->rx_user = NULL;
+    
+    /* If you have an AUX pin wired to the STM32 to check E32 status, 
+       you can add a short delay or check here. For now, assume OK. */
+    
     return LORA_OK;
 }
 
-void Lora_StartReceive(LoraCtx_t *ctx) 
+void Lora_SetRxByteHandler(LoraCtx_t *ctx, LoraRxCb_t cb, void *user)
 {
-    if (!ctx || !ctx->huart) return;
-    
-    // DMA'yı Idle Line (Paket sonu) modunda dinlemeye başlat
-    HAL_UARTEx_ReceiveToIdle_DMA(ctx->huart, lora_dma_rx_buf, LORA_RX_BUF_SIZE);
-    
-    // Gereksiz yere işlemciyi yormaması için "Half-Transfer" kesmesini kapatıyoruz
-    __HAL_DMA_DISABLE_IT(ctx->huart->hdmarx, DMA_IT_HT);
+    if (!ctx) return;
+    ctx->rx_cb   = cb;
+    ctx->rx_user = user;
 }
 
-// STM32'nin donanımsal DMA paket alma kesmesi (Paket bittiğinde otomatik çalışır)
-void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size) 
+LoraStatus_t Lora_StartReceive(LoraCtx_t *ctx)
 {
-    if (huart->Instance == USART2) // Veri LoRa'dan mı geldi?
+    if (!ctx || !ctx->huart) return LORA_ERR;
+    
+    /* Start listening for the very first byte via UART Interrupt */
+    if (HAL_UART_Receive_IT(ctx->huart, &ctx->rx_byte_buf, 1) != HAL_OK)
     {
-        uint32_t now = HAL_GetTick();
-        
-        // 1. DMA tamponundaki verileri byte-byte telemetri state-machine'ine gönder
-        for (uint16_t i = 0; i < Size; i++) 
+        return LORA_ERR;
+    }
+    
+    return LORA_OK;
+}
+
+LoraStatus_t Lora_Send(LoraCtx_t *ctx, const uint8_t *data, uint16_t len)
+{
+    if (!ctx || !ctx->huart || !data) return LORA_ERR;
+    
+    /* Optional: If you mapped the E32 AUX pin, read it here 
+       and wait for it to go HIGH before transmitting. */
+
+    if (HAL_UART_Transmit(ctx->huart, (uint8_t*)data, len, 1000) != HAL_OK)
+    {
+        return LORA_ERR;
+    }
+    
+    return LORA_OK;
+}
+
+void Lora_OnUartRxCplt(LoraCtx_t *ctx, UART_HandleTypeDef *huart)
+{
+    if (!ctx) return;
+    
+    /* Ensure the interrupt belongs to the LoRa UART */
+    if (ctx->huart == huart)
+    {
+        /* Pass the received byte to the main.c / telemetry parser */
+        if (ctx->rx_cb)
         {
-            Telemetry_RxBytePush(&tel_ctx, lora_dma_rx_buf[i], now);
+            ctx->rx_cb(ctx->rx_byte_buf, HAL_GetTick(), ctx->rx_user);
         }
         
-        // 2. İşimiz bitti, bir sonraki veri paketi için DMA'yı tekrar kur ve dinlemeye geç
-        HAL_UARTEx_ReceiveToIdle_DMA(huart, lora_dma_rx_buf, LORA_RX_BUF_SIZE);
-        __HAL_DMA_DISABLE_IT(huart->hdmarx, DMA_IT_HT);
+        /* Re-arm the UART interrupt to listen for the next byte */
+        HAL_UART_Receive_IT(ctx->huart, &ctx->rx_byte_buf, 1);
+    }
+}
+
+void Lora_OnUartError(LoraCtx_t *ctx, UART_HandleTypeDef *huart)
+{
+    if (!ctx) return;
+    
+    if (ctx->huart == huart)
+    {
+        /* Clear Overrun/Noise errors to prevent the interrupt from getting stuck */
+        __HAL_UART_CLEAR_OREFLAG(huart);
+        __HAL_UART_CLEAR_NEFLAG(huart);
+        __HAL_UART_CLEAR_FEFLAG(huart);
+        
+        /* Re-arm the UART interrupt */
+        HAL_UART_Receive_IT(ctx->huart, &ctx->rx_byte_buf, 1);
     }
 }

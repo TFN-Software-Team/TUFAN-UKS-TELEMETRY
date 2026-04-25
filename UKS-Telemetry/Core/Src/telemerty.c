@@ -1,6 +1,23 @@
 /**
  * @file    telemetry.c
- * @brief   Byte-stuffing destekli, cift-tamponlu telemetri + komut modulu.
+ * @brief   AKS uyumlu ASCII CSV decoder + tek-byte komut encoder.
+ *
+ *  Parser akisi:
+ *  1) ISR (Telemetry_RxBytePush) byte byte gelir.
+ *  2) '\r' atilir, '\n' satir sonu kabul edilir; \n gormeden
+ *     karakterler line_buf'a yazilir.
+ *  3) Satir tamamlandiginda Decode_Line cagrilir:
+ *     - Tokenize (virgul ayirici)
+ *     - Field sayisi == 15 mi
+ *     - Tag == "TEL" mi
+ *     - Numerik alanlar ayristirilir (custom parse_int, errno yok)
+ *     - Version == TEL_PROTOCOL_VERSION mi
+ *     - Sanity range kontrolu
+ *     - Sequence izleme (gap / duplicate stats)
+ *     - Ping-pong slot'a commit, frame_ready = 1
+ *
+ *  Parse maliyet: ~70 byte satir + 15 strtol benzeri = 64 MHz Cortex-M
+ *  uzerinde mikrosaniyeler. 5 Hz frame hizinda ISR'da yapilmasi guvenli.
  */
 
 #include "telemetry.h"
@@ -9,141 +26,65 @@
 
 /* ========== Dahili Yardimcilar ========== */
 
-/** Byte stuffing: 0xAA/0xAB/0xCC -> escape dizisi, diger -> oldugu gibi. */
-static inline uint8_t Stuff_Byte(uint8_t in, uint8_t *out)
+typedef struct {
+    const char *p;
+    uint16_t    len;
+} Field_t;
+
+/** Buffer'i virgule gore parcalar. Donus: bulunan field sayisi
+ *  (max_fields'i asarsa -1). Buffer'a yazmaz, sadece pointer/len verir. */
+static int Tokenize(const uint8_t *buf, uint16_t len,
+                    Field_t *fields, uint8_t max_fields)
 {
-    if (in == TEL_HEADER_BYTE)     { out[0] = TEL_ESC_BYTE; out[1] = TEL_ESC_HEADER; return 2; }
-    if (in == TEL_ESC_BYTE)        { out[0] = TEL_ESC_BYTE; out[1] = TEL_ESC_ESC;    return 2; }
-    if (in == TEL_CMD_HEADER_BYTE) { out[0] = TEL_ESC_BYTE; out[1] = TEL_ESC_CMD;    return 2; }
-    out[0] = in;
-    return 1;
-}
+    if (max_fields == 0) return -1;
+    int n = 0;
+    fields[n].p = (const char *)buf;
+    uint16_t start = 0;
 
-static uint8_t Range_Check(const TelData_t *d)
-{
-    if (d->soc > TEL_SOC_MAX)                return 0;
-    if (d->battery_temp > TEL_BAT_TEMP_MAX)  return 0;
-    if (d->motor_rpm > TEL_RPM_MAX)          return 0;
-    return 1;
-}
-
-/* ========== Gonderici (Encoder) ========== */
-
-uint8_t Telemetry_Encode(const TelData_t *data, uint8_t *out_buf, size_t max_len)
-{
-    if (!data || !out_buf || max_len < (TEL_RAW_PACKET_LEN * 2)) return 0;
-
-    uint8_t raw[TEL_RAW_PACKET_LEN];
-    raw[TEL_IDX_HEADER]   = TEL_HEADER_BYTE;
-    raw[TEL_IDX_SPEED]    = data->speed;
-    raw[TEL_IDX_SOC]      = data->soc;
-    raw[TEL_IDX_BAT_TEMP] = data->battery_temp;
-    raw[TEL_IDX_RPM_HI]   = (uint8_t)(data->motor_rpm >> 8);
-    raw[TEL_IDX_RPM_LO]   = (uint8_t)(data->motor_rpm & 0xFF);
-    raw[TEL_IDX_CHK]      = raw[0] ^ raw[1] ^ raw[2] ^ raw[3] ^ raw[4] ^ raw[5];
-
-    uint8_t pos = 0;
-    out_buf[pos++] = TEL_HEADER_BYTE;
-    for (uint8_t i = 1; i < TEL_RAW_PACKET_LEN; i++)
+    for (uint16_t i = 0; i < len; i++)
     {
-        pos += Stuff_Byte(raw[i], &out_buf[pos]);
-    }
-    return pos;
-}
-
-uint8_t Telemetry_EncodeCommand(TelCmd_t cmd, uint8_t param,
-                                uint8_t *out_buf, size_t max_len)
-{
-    if (!out_buf || max_len < TEL_CMD_STUFFED_MAX_LEN) return 0;
-
-    uint8_t raw[TEL_CMD_RAW_LEN];
-    raw[0] = TEL_CMD_HEADER_BYTE;
-    raw[1] = (uint8_t)cmd;
-    raw[2] = param;
-    raw[3] = raw[0] ^ raw[1] ^ raw[2];
-
-    uint8_t pos = 0;
-    out_buf[pos++] = TEL_CMD_HEADER_BYTE;
-    for (uint8_t i = 1; i < TEL_CMD_RAW_LEN; i++)
-    {
-        pos += Stuff_Byte(raw[i], &out_buf[pos]);
-    }
-    return pos;
-}
-
-uint8_t Telemetry_EncodeEStopBurst(uint8_t *out_buf, size_t max_len)
-{
-    if (!out_buf || max_len < TEL_ESTOP_BURST_MAX_LEN) return 0;
-
-    uint8_t total = 0;
-    for (uint8_t i = 0; i < TEL_ESTOP_BURST_COUNT; i++)
-    {
-        total += Telemetry_EncodeCommand(TEL_CMD_ESTOP, 0,
-                                         &out_buf[total], max_len - total);
-    }
-    return total;
-}
-
-/* ========== Decoder Yardimcilari ========== */
-
-/** Yeni bir frame baslatir (header goruldugunde). */
-static inline void Decoder_StartFrame(FrameDecoder_t *dec, uint8_t type)
-{
-    dec->type         = type;
-    dec->idx          = 0;
-    dec->expected_len = (type == FRAME_TYPE_TELEMETRY)
-                            ? TEL_PAYLOAD_LEN
-                            : TEL_CMD_PAYLOAD_LEN;
-    dec->state        = FRAME_PAYLOAD;
-}
-
-/** Decoder icindeki byte'i uygun tampona yazar (tip + indekse gore). */
-static inline void Decoder_WriteByte(TelCtx_t *ctx, uint8_t b)
-{
-    FrameDecoder_t *dec = &ctx->decoder;
-    if (dec->idx >= dec->expected_len) return;
-
-    if (dec->type == FRAME_TYPE_TELEMETRY)
-        ctx->buffers[ctx->write_idx][dec->idx++] = b;
-    else
-        ctx->cmd_buf[dec->idx++] = b;
-}
-
-/**
- * Komut frame tamamlandi — ISR icinde checksum'u dogrula ve E-STOP'i
- * aninda latchle. Diger komutlar (PING vb.) ana dongude parse edilir.
- */
-static inline void Decoder_CommitCommand(TelCtx_t *ctx)
-{
-    const uint8_t *pl = ctx->cmd_buf;
-    uint8_t chk = (uint8_t)(TEL_CMD_HEADER_BYTE ^ pl[0] ^ pl[1]);
-
-    if (chk != pl[2])
-    {
-        ctx->stats.cmd_chk_fail++;
-        return;
-    }
-
-    /* Fast path: E-STOP'i ISR icinde latchle */
-    if (pl[0] == (uint8_t)TEL_CMD_ESTOP)
-    {
-        ctx->stats.estop_rx_count++;
-        if (!ctx->estop_active)
+        if (buf[i] == ',')
         {
-            ctx->estop_active = 1;
-            if (ctx->estop_cb) ctx->estop_cb(ctx->estop_cb_user);
+            fields[n].len = (uint16_t)(i - start);
+            n++;
+            if (n >= max_fields) return -1;
+            fields[n].p = (const char *)&buf[i + 1];
+            start = (uint16_t)(i + 1);
         }
     }
-
-    /* Ana dongude ParseCommand ile okunacak */
-    if (!ctx->cmd_ready)
-        ctx->cmd_ready = 1;
-    else
-        ctx->stats.rx_drop++;
+    fields[n].len = (uint16_t)(len - start);
+    n++;
+    return n;
 }
 
-/** Telemetri frame tamamlandi — ping-pong cevir, ana dongu okusun. */
-static inline void Decoder_CommitTelemetry(TelCtx_t *ctx)
+/** Isaretli ondalik tam sayi parser'i. Boslukleri kabul etmez.
+ *  Donus: 1=basarili, 0=hata. Tasma 9 haneye kadar guvenli. */
+static int Parse_Int(const char *s, uint16_t len,
+                     long min_v, long max_v, long *out)
+{
+    if (len == 0) return 0;
+    int neg = 0;
+    uint16_t i = 0;
+    if (s[0] == '-') { neg = 1; i = 1; }
+    else if (s[0] == '+')      { i = 1; }
+    if (i >= len) return 0;
+
+    long v = 0;
+    for (; i < len; i++)
+    {
+        if (s[i] < '0' || s[i] > '9') return 0;
+        v = v * 10 + (s[i] - '0');
+        if (v > 999999999L) return 0;   /* 9 hane tasma korumasi */
+    }
+    if (neg) v = -v;
+    if (v < min_v || v > max_v) return 0;
+    *out = v;
+    return 1;
+}
+
+/** Ping-pong slot'a yazilan TelData_t'yi commit eder ve frame_ready set eder.
+ *  Bir frame zaten okunmadiysa overflow_drop sayilir. */
+static inline void Commit_Frame(TelCtx_t *ctx)
 {
     if (!ctx->frame_ready)
     {
@@ -153,105 +94,176 @@ static inline void Decoder_CommitTelemetry(TelCtx_t *ctx)
     }
     else
     {
-        ctx->stats.rx_drop++;
+        /* Ana dongu onceki frame'i okumadi, eski okunabilir frame'i koru */
+        ctx->stats.overflow_drop++;
     }
 }
 
-/* ========== API ========== */
+/** Sequence numarasinda gap / duplicate / stale tespiti. */
+static inline void Track_Sequence(TelCtx_t *ctx, uint32_t seq)
+{
+    if (ctx->have_last_seq)
+    {
+        if (seq == ctx->last_sequence || (int32_t)(seq - ctx->last_sequence) < 0)
+        {
+            ctx->stats.seq_dup_or_stale++;
+        }
+        else if (seq != ctx->last_sequence + 1)
+        {
+            ctx->stats.seq_gaps++;
+        }
+    }
+    ctx->last_sequence = seq;
+    ctx->have_last_seq = 1;
+}
+
+/** Tamamlanan bir satiri ayristir. Hatali satirda stats artar, donus yok. */
+static void Decode_Line(TelCtx_t *ctx, const uint8_t *buf, uint16_t len)
+{
+    Field_t f[TEL_FIELD_COUNT];
+    int nf = Tokenize(buf, len, f, TEL_FIELD_COUNT);
+    if (nf != (int)TEL_FIELD_COUNT)
+    {
+        ctx->stats.parse_fail++;
+        return;
+    }
+    ctx->stats.rx_lines++;
+
+    /* 0: tag */
+    if (f[0].len != TEL_TAG_LEN ||
+        memcmp(f[0].p, TEL_TAG_STR, TEL_TAG_LEN) != 0)
+    {
+        ctx->stats.bad_tag++;
+        return;
+    }
+
+    long v_ver, v_seq, v_rpm, v_torq, v_merr, v_mv, v_mt;
+    long v_soc, v_bcurr, v_btemp, v_bvolt, v_bcell, v_berr, v_bv;
+
+    if (!Parse_Int(f[1].p,  f[1].len,  0, 255,        &v_ver))   goto pfail;
+    if (!Parse_Int(f[2].p,  f[2].len,  0, 2147483647L,&v_seq))   goto pfail;
+    if (!Parse_Int(f[3].p,  f[3].len,  0, 65535,      &v_rpm))   goto pfail;
+    if (!Parse_Int(f[4].p,  f[4].len, -32768, 32767,  &v_torq))  goto pfail;
+    if (!Parse_Int(f[5].p,  f[5].len,  0, 255,        &v_merr))  goto pfail;
+    if (!Parse_Int(f[6].p,  f[6].len,  0, 1,          &v_mv))    goto pfail;
+    if (!Parse_Int(f[7].p,  f[7].len,  0, 1,          &v_mt))    goto pfail;
+    if (!Parse_Int(f[8].p,  f[8].len,  0, 255,        &v_soc))   goto pfail;
+    if (!Parse_Int(f[9].p,  f[9].len, -32768, 32767,  &v_bcurr)) goto pfail;
+    if (!Parse_Int(f[10].p, f[10].len,-32768, 32767,  &v_btemp)) goto pfail;
+    if (!Parse_Int(f[11].p, f[11].len, 0, 65535,      &v_bvolt)) goto pfail;
+    if (!Parse_Int(f[12].p, f[12].len, 0, 65535,      &v_bcell)) goto pfail;
+    if (!Parse_Int(f[13].p, f[13].len, 0, 255,        &v_berr))  goto pfail;
+    if (!Parse_Int(f[14].p, f[14].len, 0, 1,          &v_bv))    goto pfail;
+
+    if ((uint8_t)v_ver != TEL_PROTOCOL_VERSION)
+    {
+        ctx->stats.bad_version++;
+        return;
+    }
+
+    /* Sanity */
+    if (v_rpm   > TEL_RPM_MAX        ||
+        v_soc   > TEL_BMS_SOC_MAX    ||
+        v_btemp > TEL_BMS_TEMP_MAX   ||
+        v_btemp < TEL_BMS_TEMP_MIN)
+    {
+        ctx->stats.range_fail++;
+        return;
+    }
+
+    /* Sequence — gecerli paket sayilmadan once izle ki gap bilgisini
+     * sayisal duruma bagimsiz tutalim. */
+    Track_Sequence(ctx, (uint32_t)v_seq);
+
+    /* Ping-pong write slot'una yaz */
+    TelData_t *d = &ctx->buffers[ctx->write_idx];
+    d->protocol_version     = (uint8_t) v_ver;
+    d->sequence             = (uint32_t)v_seq;
+    d->motor_rpm            = (uint16_t)v_rpm;
+    d->motor_torque         = (int16_t) v_torq;
+    d->motor_error_flags    = (uint8_t) v_merr;
+    d->motor_data_valid     = (uint8_t) v_mv;
+    d->motor_timeout_active = (uint8_t) v_mt;
+    d->bms_soc              = (uint8_t) v_soc;
+    d->bms_current_dA       = (int16_t) v_bcurr;
+    d->bms_temp_C           = (int16_t) v_btemp;
+    d->bms_pack_voltage_dV  = (uint16_t)v_bvolt;
+    d->bms_avg_cell_mV      = (uint16_t)v_bcell;
+    d->bms_error_flags      = (uint8_t) v_berr;
+    d->bms_data_valid       = (uint8_t) v_bv;
+
+    Commit_Frame(ctx);
+    ctx->stats.good_packets++;
+    return;
+
+pfail:
+    ctx->stats.parse_fail++;
+}
+
+/* ========== Encoder ========== */
+
+uint8_t Telemetry_EncodeCommand(uint8_t cmd_byte,
+                                uint8_t *out_buf, size_t max_len)
+{
+    if (!out_buf || max_len < 1U) return 0;
+    out_buf[0] = cmd_byte;
+    return 1U;
+}
+
+uint8_t Telemetry_EncodeEStopBurst(uint8_t *out_buf, size_t max_len)
+{
+    if (!out_buf || max_len < TEL_ESTOP_BURST_COUNT) return 0;
+    for (uint8_t i = 0; i < TEL_ESTOP_BURST_COUNT; i++)
+    {
+        out_buf[i] = UKS_CMD_EMERGENCY_STOP;
+    }
+    return TEL_ESTOP_BURST_COUNT;
+}
+
+/* ========== Decoder API ========== */
 
 void Telemetry_Init(TelCtx_t *ctx)
 {
     if (!ctx) return;
     memset(ctx, 0, sizeof(*ctx));
-    ctx->decoder.state = FRAME_IDLE;
+    ctx->line_state = LINE_IDLE;
 }
 
-void Telemetry_RxBytePush(TelCtx_t *ctx, uint8_t rx_byte, uint32_t now_ms)
+void Telemetry_RxBytePush(TelCtx_t *ctx, uint8_t b, uint32_t now_ms)
 {
     if (!ctx) return;
 
     ctx->stats.rx_bytes++;
     ctx->last_rx_ms = now_ms;
 
-    FrameDecoder_t *dec = &ctx->decoder;
+    /* CR atilir. AKS \r\n yolluyor; sadece \n'i satir sonu olarak alalim. */
+    if (b == '\r') return;
 
-    switch (dec->state)
+    if (b == '\n')
     {
-    case FRAME_IDLE:
-        if      (rx_byte == TEL_HEADER_BYTE)     Decoder_StartFrame(dec, FRAME_TYPE_TELEMETRY);
-        else if (rx_byte == TEL_CMD_HEADER_BYTE) Decoder_StartFrame(dec, FRAME_TYPE_COMMAND);
-        /* Diger byte'lari yoksay */
-        break;
-
-    case FRAME_PAYLOAD:
-        /* Yeni header mid-frame — mevcut frame'i iptal et, yenisini baslat.
-         * 0xCC (komut) mid-frame geldiginde E-STOP ONCELIGI igin yeni frame
-         * olarak ele alinir — telemetri frame'i iptal edilir. */
-        if (rx_byte == TEL_HEADER_BYTE)
+        if (ctx->line_len > 0U)
         {
-            Decoder_StartFrame(dec, FRAME_TYPE_TELEMETRY);
-            break;
+            Decode_Line(ctx, ctx->line_buf, ctx->line_len);
         }
-        if (rx_byte == TEL_CMD_HEADER_BYTE)
-        {
-            Decoder_StartFrame(dec, FRAME_TYPE_COMMAND);
-            break;
-        }
-        if (rx_byte == TEL_ESC_BYTE)
-        {
-            dec->state = FRAME_ESC;
-            break;
-        }
-
-        Decoder_WriteByte(ctx, rx_byte);
-
-        if (dec->idx >= dec->expected_len)
-        {
-            if (dec->type == FRAME_TYPE_TELEMETRY) Decoder_CommitTelemetry(ctx);
-            else                                   Decoder_CommitCommand(ctx);
-            dec->state = FRAME_IDLE;
-        }
-        break;
-
-    case FRAME_ESC:
-    {
-        uint8_t decoded;
-        if      (rx_byte == TEL_ESC_HEADER) decoded = TEL_HEADER_BYTE;
-        else if (rx_byte == TEL_ESC_ESC)    decoded = TEL_ESC_BYTE;
-        else if (rx_byte == TEL_ESC_CMD)    decoded = TEL_CMD_HEADER_BYTE;
-        else if (rx_byte == TEL_HEADER_BYTE)
-        {
-            /* Kurtarma: 0xAB sonrasi ham 0xAA -> hatali escape, yeni
-             * telemetri frame olarak restart */
-            ctx->stats.stuff_err++;
-            Decoder_StartFrame(dec, FRAME_TYPE_TELEMETRY);
-            break;
-        }
-        else if (rx_byte == TEL_CMD_HEADER_BYTE)
-        {
-            /* Kurtarma: 0xAB sonrasi ham 0xCC -> yeni komut frame */
-            ctx->stats.stuff_err++;
-            Decoder_StartFrame(dec, FRAME_TYPE_COMMAND);
-            break;
-        }
-        else
-        {
-            ctx->stats.stuff_err++;
-            dec->state = FRAME_IDLE;
-            break;
-        }
-
-        Decoder_WriteByte(ctx, decoded);
-        dec->state = FRAME_PAYLOAD;
-
-        if (dec->idx >= dec->expected_len)
-        {
-            if (dec->type == FRAME_TYPE_TELEMETRY) Decoder_CommitTelemetry(ctx);
-            else                                   Decoder_CommitCommand(ctx);
-            dec->state = FRAME_IDLE;
-        }
-        break;
+        ctx->line_len   = 0;
+        ctx->line_state = LINE_IDLE;
+        return;
     }
+
+    /* Yazdirilamayan/control karakterleri sessizce yoksay (debug noise) */
+    if (b < 0x20U) return;
+
+    if (ctx->line_len < TEL_LINE_MAX_LEN)
+    {
+        ctx->line_buf[ctx->line_len++] = b;
+        ctx->line_state = LINE_COLLECT;
+    }
+    else
+    {
+        /* Tampon dolu — bu satiri at, \n gorunce sifirlanacak */
+        ctx->stats.overflow_drop++;
+        ctx->line_len   = 0;
+        ctx->line_state = LINE_IDLE;
     }
 }
 
@@ -260,89 +272,35 @@ uint8_t Telemetry_IsFrameReady(const TelCtx_t *ctx)
     return ctx ? ctx->frame_ready : 0;
 }
 
-uint8_t Telemetry_IsCommandReady(const TelCtx_t *ctx)
-{
-    return ctx ? ctx->cmd_ready : 0;
-}
-
 TelStatus_t Telemetry_Parse(TelCtx_t *ctx, TelData_t *out)
 {
-    if (!ctx || !out) return TEL_ERR_NULL;
-    if (!ctx->frame_ready) return TEL_NO_DATA;
+    if (!ctx || !out)        return TEL_ERR_NULL;
+    if (!ctx->frame_ready)   return TEL_NO_DATA;
 
-    const uint8_t *pl = ctx->buffers[ctx->read_idx];
-    ctx->frame_ready = 0;  /* ISR yeni frame kabul edebilir */
-
-    uint8_t chk = TEL_HEADER_BYTE ^ pl[0] ^ pl[1] ^ pl[2] ^ pl[3] ^ pl[4];
-    if (chk != pl[5])
-    {
-        ctx->stats.chk_fail++;
-        return TEL_CHK_FAIL;
-    }
-
-    out->speed        = pl[0];
-    out->soc          = pl[1];
-    out->battery_temp = pl[2];
-    out->motor_rpm    = ((uint16_t)pl[3] << 8) | pl[4];
-
-    if (!Range_Check(out))
-    {
-        ctx->stats.range_fail++;
-        return TEL_OUT_OF_RANGE;
-    }
-
-    ctx->stats.good_packets++;
+    /* ISR write_idx'i flip etti, read_idx kararli — kopyala ve flag'i bosalt. */
+    *out = ctx->buffers[ctx->read_idx];
+    ctx->frame_ready = 0;
     return TEL_VALID;
-}
-
-TelStatus_t Telemetry_ParseCommand(TelCtx_t *ctx, TelCmd_t *cmd_out, uint8_t *param_out)
-{
-    if (!ctx || !cmd_out || !param_out) return TEL_ERR_NULL;
-    if (!ctx->cmd_ready) return TEL_NO_DATA;
-
-    /* ISR cmd_buf'i bir sonraki komut icin yeniden yazmaya baslayabilir
-     * — once yerel snapshot al, sonra flag'i bosalt. */
-    uint8_t pl[TEL_CMD_PAYLOAD_LEN];
-    memcpy(pl, ctx->cmd_buf, sizeof(pl));
-    ctx->cmd_ready = 0;
-
-    /* ISR zaten checksum'u dogruladi ve (varsa) E-STOP'u latchledi.
-     * Burada sadece komut tiplemesi yapiyoruz. */
-    *cmd_out   = (TelCmd_t)pl[0];
-    *param_out = pl[1];
-
-    switch (pl[0])
-    {
-    case TEL_CMD_ESTOP:
-    case TEL_CMD_ESTOP_CLEAR:
-    case TEL_CMD_PING:
-        ctx->stats.good_commands++;
-        return TEL_VALID;
-    default:
-        return TEL_UNKNOWN_CMD;
-    }
 }
 
 void Telemetry_Tick(TelCtx_t *ctx, uint32_t now_ms)
 {
     if (!ctx) return;
-
-    if (ctx->decoder.state == FRAME_IDLE)
+    if (ctx->line_state == LINE_IDLE)
     {
         ctx->last_rx_ms = now_ms;
         return;
     }
-
     if ((now_ms - ctx->last_rx_ms) >= TEL_PARTIAL_TIMEOUT_MS)
     {
-        ctx->decoder.state = FRAME_IDLE;
-        ctx->decoder.idx   = 0;
+        ctx->line_state = LINE_IDLE;
+        ctx->line_len   = 0;
         ctx->stats.timeout_drop++;
         ctx->last_rx_ms = now_ms;
     }
 }
 
-/* ========== E-STOP Kontrolu ========== */
+/* ========== UKS Lokal E-STOP ========== */
 
 uint8_t Telemetry_IsEStopActive(const TelCtx_t *ctx)
 {
@@ -354,6 +312,16 @@ void Telemetry_ClearEStop(TelCtx_t *ctx)
     if (ctx) ctx->estop_active = 0;
 }
 
+void Telemetry_SetEStopActive(TelCtx_t *ctx)
+{
+    if (!ctx) return;
+    if (!ctx->estop_active)
+    {
+        ctx->estop_active = 1;
+        if (ctx->estop_cb) ctx->estop_cb(ctx->estop_cb_user);
+    }
+}
+
 void Telemetry_SetEStopCallback(TelCtx_t *ctx, TelEStopCb_t cb, void *user)
 {
     if (!ctx) return;
@@ -361,7 +329,7 @@ void Telemetry_SetEStopCallback(TelCtx_t *ctx, TelEStopCb_t cb, void *user)
     ctx->estop_cb_user = user;
 }
 
-/* ========== Istatistik ========== */
+/* ========== Stats ========== */
 
 const TelStats_t *Telemetry_GetStats(const TelCtx_t *ctx)
 {
@@ -373,14 +341,15 @@ void Telemetry_ResetStats(TelCtx_t *ctx)
     if (ctx) memset(&ctx->stats, 0, sizeof(ctx->stats));
 }
 
-/* ========== Yer Istasyonu Ekrani ========== */
+/* ========== Ekran ========== */
 
 static void Print_SocBar(uint8_t soc)
 {
-    const uint8_t bar_width = 20;
-    uint8_t filled = (uint8_t)((uint16_t)soc * bar_width / 100);
+    const uint8_t bar_w = 20;
+    uint8_t filled = (uint8_t)((uint16_t)soc * bar_w / 100U);
+    if (filled > bar_w) filled = bar_w;
     printf("[");
-    for (uint8_t i = 0; i < bar_width; i++)
+    for (uint8_t i = 0; i < bar_w; i++)
         printf("%c", (i < filled) ? '#' : '-');
     printf("]");
 }
@@ -389,81 +358,90 @@ static const char *Status_Str(TelStatus_t s)
 {
     switch (s)
     {
-        case TEL_VALID:        return "OK";
-        case TEL_NO_DATA:      return "NO_DATA";
-        case TEL_CHK_FAIL:     return "CHK_FAIL";
-        case TEL_OUT_OF_RANGE: return "RANGE_ERR";
-        case TEL_ERR_NULL:     return "NULL_PTR";
-        case TEL_UNKNOWN_CMD:  return "UNK_CMD";
-        default:               return "UNKNOWN";
+        case TEL_VALID:    return "OK";
+        case TEL_NO_DATA:  return "NO_DATA";
+        case TEL_ERR_NULL: return "NULL";
+        default:           return "UNK";
     }
 }
 
-void Telemetry_PrintCompact(const TelData_t *data, TelStatus_t status)
-{
-    if (status == TEL_NO_DATA) { printf("[TEL] Veri yok\n"); return; }
-    printf("[TEL][%s] SPD:%3u km/h | SOC:%3u%% | TEMP:%3u C | RPM:%5u\n",
-           Status_Str(status),
-           data->speed, data->soc, data->battery_temp, data->motor_rpm);
-}
-
-void Telemetry_PrintDashboard(const TelData_t *data, TelStatus_t status,
+void Telemetry_PrintDashboard(const TelData_t *d, TelStatus_t status,
                               uint8_t estop_active)
 {
-    printf("\n");
-    printf("  +======================================+\n");
-    printf("  |        YER ISTASYONU TELEMETRI       |\n");
-    printf("  +======================================+\n");
+    printf("\r\n");
+    printf("  +============================================+\r\n");
+    printf("  |        UKS YER ISTASYONU TELEMETRI         |\r\n");
+    printf("  +============================================+\r\n");
 
     if (estop_active)
     {
-        printf("  |  *** !!! ACIL DURDURMA AKTIF !!! *** |\n");
-        printf("  |   Motor devre disi — manuel reset    |\n");
-        printf("  |--------------------------------------|\n");
+        printf("  |  *** !!! ACIL DURDURMA AKTIF !!! ***       |\r\n");
+        printf("  |  Motor devre disi - manuel reset gerek    |\r\n");
+        printf("  |--------------------------------------------|\r\n");
     }
 
-    if (status == TEL_NO_DATA)
+    if (status == TEL_NO_DATA || !d)
     {
-        printf("  |  ** Veri bekleniyor...               |\n");
-        printf("  +======================================+\n\n");
+        printf("  |  ** AKS'ten veri bekleniyor...            |\r\n");
+        printf("  +============================================+\r\n\r\n");
         return;
     }
 
-    printf("  |  Durum   : %-10s                |\n", Status_Str(status));
-    printf("  |--------------------------------------|\n");
-    printf("  |  Hiz     : %3u km/h                  |\n",
-           estop_active ? 0 : data->speed);
-    printf("  |  SoC     : %3u%%  ", data->soc);
-    Print_SocBar(data->soc);
-    printf("  |\n");
-    printf("  |  Bat.Sic : %3u C", data->battery_temp);
+    printf("  |  Durum: %-7s  Seq: %-8lu Ver: %u       |\r\n",
+           Status_Str(status), (unsigned long)d->sequence,
+           (unsigned)d->protocol_version);
+    printf("  |--- Motor ----------------------------------|\r\n");
+    printf("  |   RPM    : %5u    Torque : %6d         |\r\n",
+           estop_active ? 0U : d->motor_rpm,
+           (int)d->motor_torque);
+    printf("  |   Errs   : 0x%02X     Valid  : %u  Tout: %u  |\r\n",
+           (unsigned)d->motor_error_flags,
+           (unsigned)d->motor_data_valid,
+           (unsigned)d->motor_timeout_active);
+    printf("  |--- BMS ------------------------------------|\r\n");
+    printf("  |   SoC    : %3u%%  ", (unsigned)d->bms_soc);
+    Print_SocBar(d->bms_soc);
+    printf(" |\r\n");
 
-    if      (data->battery_temp > 60) printf("   !! YUKSEK !!");
-    else if (data->battery_temp > 45) printf("   !  UYARI  !");
-    else                              printf("              ");
-    printf("  |\n");
+    /* Curr deci-A -> A.dA, Volt deci-V -> V.dV */
+    int   ca  = d->bms_current_dA      / 10;
+    int   cd  = d->bms_current_dA % 10; if (cd < 0) cd = -cd;
+    unsigned va = (unsigned)(d->bms_pack_voltage_dV / 10U);
+    unsigned vd = (unsigned)(d->bms_pack_voltage_dV % 10U);
+    printf("  |   Curr   : %4d.%d A   Pack : %3u.%u V      |\r\n",
+           ca, cd, va, vd);
 
-    printf("  |  Motor   : %5u RPM                 |\n",
-           estop_active ? 0 : data->motor_rpm);
-    printf("  +======================================+\n\n");
+    printf("  |   Temp   : %4d C", (int)d->bms_temp_C);
+    if      (d->bms_temp_C > 60) printf("    !! YUKSEK !!");
+    else if (d->bms_temp_C > 45) printf("    !  UYARI  !");
+    else                         printf("                ");
+    printf("    |\r\n");
+
+    printf("  |   Cell   : %4u mV    Errs : 0x%02X  V:%u  |\r\n",
+           (unsigned)d->bms_avg_cell_mV,
+           (unsigned)d->bms_error_flags,
+           (unsigned)d->bms_data_valid);
+    printf("  +============================================+\r\n\r\n");
 }
 
 void Telemetry_PrintStats(const TelCtx_t *ctx)
 {
     if (!ctx) return;
     const TelStats_t *s = &ctx->stats;
-
-    printf("\n  --- Istatistikler ---\n");
-    printf("  RX byte        : %u\n", (unsigned)s->rx_bytes);
-    printf("  Drop (dolu)    : %u\n", (unsigned)s->rx_drop);
-    printf("  CHK hata       : %u\n", (unsigned)s->chk_fail);
-    printf("  Range hata     : %u\n", (unsigned)s->range_fail);
-    printf("  Timeout        : %u\n", (unsigned)s->timeout_drop);
-    printf("  Stuff hata     : %u\n", (unsigned)s->stuff_err);
-    printf("  Gecerli pkt    : %u\n", (unsigned)s->good_packets);
-    printf("  Gecerli komut  : %u\n", (unsigned)s->good_commands);
-    printf("  Komut CHK hata : %u\n", (unsigned)s->cmd_chk_fail);
-    printf("  E-STOP alindi  : %u\n", (unsigned)s->estop_rx_count);
-    printf("  E-STOP aktif   : %s\n", ctx->estop_active ? "EVET" : "hayir");
-    printf("  -----------------------\n\n");
+    printf("\r\n  --- Istatistikler ---\r\n");
+    printf("  RX byte         : %lu\r\n", (unsigned long)s->rx_bytes);
+    printf("  RX satir        : %lu\r\n", (unsigned long)s->rx_lines);
+    printf("  Parse hata      : %lu\r\n", (unsigned long)s->parse_fail);
+    printf("  Tag hata        : %lu\r\n", (unsigned long)s->bad_tag);
+    printf("  Version hata    : %lu\r\n", (unsigned long)s->bad_version);
+    printf("  Range hata      : %lu\r\n", (unsigned long)s->range_fail);
+    printf("  Timeout/overflow: %lu / %lu\r\n",
+           (unsigned long)s->timeout_drop,
+           (unsigned long)s->overflow_drop);
+    printf("  Gecerli pkt     : %lu\r\n", (unsigned long)s->good_packets);
+    printf("  Seq gap         : %lu\r\n", (unsigned long)s->seq_gaps);
+    printf("  Seq dup/stale   : %lu\r\n", (unsigned long)s->seq_dup_or_stale);
+    printf("  E-STOP TX (UKS) : %lu\r\n", (unsigned long)s->estop_tx_count);
+    printf("  E-STOP aktif    : %s\r\n", ctx->estop_active ? "EVET" : "hayir");
+    printf("  ---------------------\r\n\r\n");
 }
