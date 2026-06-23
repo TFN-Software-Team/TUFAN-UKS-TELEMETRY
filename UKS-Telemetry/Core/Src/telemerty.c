@@ -70,8 +70,13 @@ static int Parse_Int(const char *s, uint16_t len,
     for (; i < len; i++)
     {
         if (s[i] < '0' || s[i] > '9') return 0;
+        /* BUG #9 DUZELTME (v2): Son digit de kontrol edilmeli.
+         * v==214748364 iken digit>=8 gelirse v*10+digit = 2147483648
+         * -> signed long overflow -> Undefined Behavior (-O2'de UB
+         * derleyici tarafindan optimize edilebilir). */
+        if (v > 214748364L ||
+            (v == 214748364L && (s[i] - '0') > 7)) return 0;
         v = v * 10 + (s[i] - '0');
-        if (v > 999999999L) return 0;
     }
     if (neg) v = -v;
     if (v < min_v || v > max_v) return 0;

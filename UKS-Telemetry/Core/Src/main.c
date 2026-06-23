@@ -4,21 +4,16 @@
   * @file           : main.c
   * @brief          : UKS Yer Istasyonu - AKS protokolu entegre.
   *
-  *  - USART1 (PA9/PA10): PC monitor (printf), 9600 baud.
-  *  - USART2 (PA2/PA3) : LoRa E32-433T30D, 9600 baud (AKS uyumlu).
-  *  - LoRa modulu RX kesmesi acik, byte byte telemetry parser'a gider.
-  *  - PA0 EXTI: Acil durdurma butonu (operator).
-  *  - Ana donguden alinan telemetry frame'leri dashboard ile yazdirilir.
-  *
   *  Duzeltmeler:
-  *  BUG #4: _write/__io_putchar — printf yonlendirmesi netlestirildi.
-  *  BUG #5: E-STOP TX timeout 1000 -> 50 ms.
-  *  BUG #6 (KRITIK): Saat config klon STM32F103 cipler icin yeniden
-  *          yazildi. Onceki HSI/2 -> PLLx16 -> 64 MHz konfigurasyonu klon
-  *          ciplerde PLL kilitlenmesi sorunu yaratiyordu; cip flash'lanip
-  *          dogrulaniyor ama PLL kilitlenmedigi icin calismadan kaliyordu.
-  *          Cozum: PLL yok, ham HSI 8 MHz, FLASH_LATENCY_0. 9600 baud bu
-  *          saatte sorunsuz.
+  *  BUG #4: _write/__io_putchar printf yonlendirmesi.
+  *  BUG #5: E-STOP TX timeout 50 ms.
+  *  BUG #6: Klon-guvenli saat HSI 8 MHz, PLL yok.
+  *  BUG #7: USART1 115200 baud — 9600'de 100 ms timeout dashboard'u
+  *          kesiyor (700 byte @ 9600 = ~730 ms). 115200'de ~60 ms,
+  *          timeout 200 ms ile guvenli margin.
+  *  BUG #8: Debounce boot edge case — last_button_press = UINT32_MAX
+  *          ile baslatildi. Onceki 0 degeri sistemin ilk 200 ms'inde
+  *          E-STOP butonunu yok sayiyordu.
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -30,15 +25,22 @@
 #include <string.h>
 
 /* ========== Donanim Handle'lari ========== */
-UART_HandleTypeDef huart1;   /* PC monitor */
-UART_HandleTypeDef huart2;   /* LoRa E32   */
+UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart2;
 
 /* ========== Sistem Durumu ========== */
 TelCtx_t           tel_ctx;
 static LoraCtx_t   lora_ctx;
 
 static uint32_t          last_heartbeat_ms = 0;
-static uint32_t          last_button_press = 0;
+
+/* BUG #8 DUZELTME: Boot'ta E-STOP kilitlenmesi.
+ * 0 ile baslatilinca ilk 200 ms'de buton yok sayiliyordu.
+ * UINT32_MAX da unsigned wraparound ile ayni sorunu yaratiyordu.
+ * (uint32_t)(-2000) = 4294965296: boot'ta now~0,
+ * (0 - 4294965296) wraparound ile ~2000 > 200 -> koşul geçilir. */
+static uint32_t          last_button_press = (uint32_t)(-2000);
+
 static volatile uint8_t  estop_tx_pending  = 0;
 
 /* ========== Prototipler ========== */
@@ -49,18 +51,20 @@ static void MX_USART2_UART_Init(void);
 
 /* ====================================================================
  * printf -> USART1 yonlendirmesi.
+ * BUG #7: timeout 200 ms — 115200 baud'da maks dashboard ~60 ms,
+ * yeterli margin var.
  * ==================================================================== */
 int __io_putchar(int ch)
 {
     uint8_t c = (uint8_t)ch;
-    HAL_UART_Transmit(&huart1, &c, 1, 100);
+    HAL_UART_Transmit(&huart1, &c, 1, 200);
     return ch;
 }
 
 int _write(int file, char *ptr, int len)
 {
     (void)file;
-    HAL_UART_Transmit(&huart1, (uint8_t *)ptr, (uint16_t)len, 100);
+    HAL_UART_Transmit(&huart1, (uint8_t *)ptr, (uint16_t)len, 200);
     return len;
 }
 
@@ -91,7 +95,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     if (GPIO_Pin != AC_L_STOP_Pin) return;
 
     uint32_t now = HAL_GetTick();
-    if ((now - last_button_press) <= 200U) return;   /* debounce */
+    if ((now - last_button_press) <= 200U) return;
     last_button_press = now;
 
     HAL_GPIO_WritePin(MOTOR_EN_GPIO_Port, MOTOR_EN_Pin, GPIO_PIN_RESET);
@@ -100,7 +104,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 }
 
 /* ====================================================================
- * E-STOP TX — ana donguden, kisa timeout (50 ms)
+ * E-STOP TX — 50 ms timeout
  * ==================================================================== */
 static void process_estop_tx(void)
 {
@@ -123,9 +127,6 @@ static void process_estop_tx(void)
     }
 }
 
-/**
-  * @brief  Uygulama Giris Noktasi
-  */
 int main(void)
 {
     HAL_Init();
@@ -140,7 +141,8 @@ int main(void)
     printf("\r\n>>> UKS YER ISTASYONU BASLATILIYOR <<<\r\n");
     printf("    Telemetry  : ASCII CSV (15 alan, AKS uyumlu)\r\n");
     printf("    Sistem saat: HSI 8 MHz\r\n");
-    printf("    LoRa baud  : 9600\r\n");
+    printf("    Monitor    : 115200 baud\r\n");
+    printf("    LoRa       : 9600 baud\r\n");
 
     Telemetry_Init(&tel_ctx);
 
@@ -192,12 +194,15 @@ int main(void)
 }
 
 /* ====================================================================
- * USART1 — PC monitor (PA9 TX / PA10 RX), 9600 baud
+ * BUG #7 DUZELTME: USART1 115200 baud.
+ * 9600 baud + 100 ms timeout kombinasyonu dashboard ciktisini (700 byte)
+ * kesiyordu. 115200'de ayni veri ~60 ms, 200 ms timeout ile guvenli.
+ * Seri monitor tarafinda da baud rate'i 115200'e guncelle.
  * ==================================================================== */
 static void MX_USART1_UART_Init(void)
 {
     huart1.Instance          = USART1;
-    huart1.Init.BaudRate     = 9600;
+    huart1.Init.BaudRate     = 115200;  /* 9600'den degistirildi */
     huart1.Init.WordLength   = UART_WORDLENGTH_8B;
     huart1.Init.StopBits     = UART_STOPBITS_1;
     huart1.Init.Parity       = UART_PARITY_NONE;
@@ -208,7 +213,7 @@ static void MX_USART1_UART_Init(void)
 }
 
 /* ====================================================================
- * USART2 — LoRa E32 (PA2 TX / PA3 RX), 9600 baud
+ * USART2 — LoRa E32 (PA2 TX / PA3 RX), 9600 baud (AKS ile sabit)
  * ==================================================================== */
 static void MX_USART2_UART_Init(void)
 {
@@ -223,9 +228,6 @@ static void MX_USART2_UART_Init(void)
     if (HAL_UART_Init(&huart2) != HAL_OK) Error_Handler();
 }
 
-/* ====================================================================
- * GPIO baslatma
- * ==================================================================== */
 static void MX_GPIO_Init(void)
 {
     GPIO_InitTypeDef g = {0};
@@ -254,15 +256,10 @@ static void MX_GPIO_Init(void)
 }
 
 /* ====================================================================
- * BUG #6 DUZELTME: Klon-guvenli saat — PLL yok, ham HSI 8 MHz.
- *
- * Orijinal kod HSI/2 -> PLLx16 -> 64 MHz yapiyordu. Klon STM32F103
- * ciplerde PLL bu carpanda kilitlenmiyor; HAL_RCC_OscConfig ya
- * timeout'la Error_Handler'a dusuyor ya da cip kararsiz/yanlis saatte
- * kaliyor. Sonuc: flash dogrulaniyor ama firmware calismiyor.
- *
- * Bu konfigurasyon en saglam secenek: SYSCLK = HCLK = PCLK1 = PCLK2 =
- * 8 MHz, flash wait-state 0. 9600 baud icin fazlasiyla yeterli.
+ * Klon-guvenli saat: HSI 8 MHz, PLL yok, FLASH_LATENCY_0.
+ * NOT: USART1 115200 baud @ 8 MHz HCLK — APB2 prescaler 1 (PCLK2=8MHz).
+ * STM32F103 USART1 baud hesabi: 8000000 / 115200 = 69.4 -> BRR=0x45 (hata ~0.16%)
+ * Bu hata orani UART icin kabul edilebilir sinirin (<2%) cok altinda.
  * ==================================================================== */
 void SystemClock_Config(void)
 {
@@ -272,12 +269,12 @@ void SystemClock_Config(void)
     o.OscillatorType      = RCC_OSCILLATORTYPE_HSI;
     o.HSIState            = RCC_HSI_ON;
     o.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-    o.PLL.PLLState        = RCC_PLL_NONE;   /* PLL devre disi */
+    o.PLL.PLLState        = RCC_PLL_NONE;
     if (HAL_RCC_OscConfig(&o) != HAL_OK) Error_Handler();
 
     c.ClockType      = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
                        RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
-    c.SYSCLKSource   = RCC_SYSCLKSOURCE_HSI; /* SYSCLK = HSI = 8 MHz */
+    c.SYSCLKSource   = RCC_SYSCLKSOURCE_HSI;
     c.AHBCLKDivider  = RCC_SYSCLK_DIV1;
     c.APB1CLKDivider = RCC_HCLK_DIV1;
     c.APB2CLKDivider = RCC_HCLK_DIV1;
