@@ -13,14 +13,16 @@
  *      0xA3 = STOP
  *      0xA4 = DRIVE_ENABLE
  *
- *  Mimari (v3 — ISR yuku azaltildi):
+ *  Mimari (v3/v4 — ISR yuku azaltildi):
  *  - ISR (Telemetry_RxBytePush) artik SADECE ham byte'i dairesel tampona
  *    (ring buffer) yazar ve cikar. Hicbir parse/tokenize ISR'da yapilmaz.
  *    Boylece ISR suresi her byte icin sabit ve mikrosaniye seviyesinde
  *    kalir → 8 MHz HSI'da bile Overrun (ORE) riski pratikte sifirlanir.
  *  - Satir birlestirme + parse + range check + commit, ana donguden
  *    cagrilan Telemetry_Process() icinde (main context) yapilir.
- *  - Cift tampon (ping-pong) TelData_t — Process yazar, ana dongu okur.
+ *  - Decode edilmis frame'ler SPSC kuyruguna (frame_q) yazilir; Process
+ *    uretici, Telemetry_Parse tuketicidir. Tek main turunda birden cok
+ *    frame gelse de kuyruk derinligi sayesinde kaybolmaz.
  *  - Sequence numarasi izlenir; gap/duplicate sayilari stats'a yazilir.
  *  - E-STOP UKS'te lokal latch'lenir (AKS bu komutu UKS'e yansitmaz).
  */
@@ -46,6 +48,12 @@
  * dashboard basarken (60 ms) bile rahatca yetisilir. */
 #define TEL_RX_RING_SIZE        256U
 #define TEL_RX_RING_MASK        (TEL_RX_RING_SIZE - 1U)
+
+/* Decode edilmis frame kuyrugu derinligi. 2'nin kuvveti olmali (maske ile
+ * sarma). Air-rate ~450 ms/frame, en kotu bloklama (dashboard) ~60 ms →
+ * pratikte 1 frame bile birikmiyor; 4 rahat marj birakir. */
+#define TEL_FRAME_Q_DEPTH       4U
+#define TEL_FRAME_Q_MASK        (TEL_FRAME_Q_DEPTH - 1U)
 
 /* UKS -> AKS komut byte'lari (UKS_LoRa_Protocol.md ile birebir) */
 #define UKS_CMD_EMERGENCY_STOP  0xA1U
@@ -128,18 +136,20 @@ typedef struct {
      * Tek-uretici/tek-tuketici → kilit gerekmez (head volatile yeterli). */
     uint8_t          rx_ring[TEL_RX_RING_SIZE];
     volatile uint16_t rx_head;   /* ISR yazar */
-    uint16_t          rx_tail;   /* ana dongu okur */
+    volatile uint16_t rx_tail;   /* ana dongu okur — SPSC tutarliligi */
 
     /* ASCII satir parser tamponu (artik ana donguden kullanilir) */
     LineState_t line_state;
     uint16_t    line_len;
     uint8_t     line_buf[TEL_LINE_MAX_LEN];
 
-    /* Cift tampon — Process write, main read */
-    TelData_t        buffers[2];
-    volatile uint8_t write_idx;
-    volatile uint8_t read_idx;
-    volatile uint8_t frame_ready;
+    /* Decode edilmis frame kuyrugu (SPSC). Uretici = Telemetry_Process
+     * (Commit_Frame), tuketici = Telemetry_Parse. rx_ring ile birebir ayni
+     * desen — yalnizca uint8_t yerine TelData_t tasir. Tek-uretici/tek-
+     * tuketici oldugu icin kilit GEREKMEZ (head/tail volatile yeterli). */
+    TelData_t        frame_q[TEL_FRAME_Q_DEPTH];
+    volatile uint8_t fq_head;   /* Commit_Frame yazar (yayinlar) */
+    volatile uint8_t fq_tail;   /* Telemetry_Parse yazar (tuketir) */
 
     /* Sequence izleme */
     uint32_t  last_sequence;

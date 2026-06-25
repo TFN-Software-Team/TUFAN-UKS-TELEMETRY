@@ -319,9 +319,10 @@ static void MX_GPIO_Init(void)
     HAL_NVIC_SetPriority(EXTI0_IRQn, 1, 0);
     HAL_NVIC_EnableIRQ(EXTI0_IRQn);
 
-    /* USART2 interrupt — en dusuk (RX byte'lari ring'e duser, acele yok) */
-    HAL_NVIC_SetPriority(USART2_IRQn, 2, 0);
-    HAL_NVIC_EnableIRQ(USART2_IRQn);
+    /* USART2 NVIC onceligi/enable'i HAL_UART_MspInit icinde ayarlanir.
+     * MspInit, MX_GPIO_Init'ten SONRA (UART init sirasinda) calistigi icin
+     * burada set edilen deger eziliyordu; tek-kaynak orasi olsun diye bu
+     * blok kaldirildi. Hedef hiyerarsi: SysTick(0) > EXTI0(1) > USART2(2). */
 }
 
 /* ====================================================================

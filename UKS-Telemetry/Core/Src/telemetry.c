@@ -2,16 +2,13 @@
  * @file    telemetry.c
  * @brief   AKS uyumlu ASCII CSV decoder + tek-byte komut encoder.
  *
- *  Duzeltmeler (v2):
- *  1) Commit_Frame race condition giderildi: read_idx/write_idx/frame_ready
- *     atamalari critical section (PRIMASK) icine alindi.
- *  2) Telemetry_Parse icindeki frame_ready=0 atamasi da critical section
- *     icine alindi; ISR ile cakisma engellendi.
+ *  Duzeltmeler (v2 — NOT: 1-2. maddeler v4'te kuyruk yapisiyla
+ *  tasinmistir, asagidaki v4 bolumune bakiniz):
+ *  3) Telemetry_Tick: LINE_IDLE durumunda last_rx_ms sifirlanmiyordu,
  *  3) Telemetry_Tick: LINE_IDLE durumunda last_rx_ms sifirlanmiyordu,
  *     bu timeout saatini yanlis sifirliyor ve LINE_COLLECT'e girer
  *     girmez timeout'u uzatiyordu. IDLE branch'i kaldirildi.
- *
- *  Duzeltmeler (v3 — ISR yuku azaltildi):
+ * 
  *  4) ISR'da parse YAPILMIYOR. Telemetry_RxBytePush artik sadece gelen
  *     byte'i dairesel tampona (ring buffer) yazar. Eski byte-isleme
  *     mantigi (satir birlestirme + Decode_Line) Telemetry_Process'e
@@ -23,14 +20,23 @@
  *     mikrosaniye seviyesinde; parse suresi kritik degil cunku ring
  *     buffer arka planda dolmaya devam eder.
  *
- *     NOT: Decode_Line / Parse_Int / Tokenize / Commit_Frame / Track_Sequence
- *     mantigi DEGISMEDI — yalnizca cagrildiklari baglam (ISR → main) degisti.
- *     Commit_Frame'deki PRIMASK bloku artik teknik olarak gereksiz (Process
- *     ve ana dongu ayni baglamda) ama zararsiz oldugu icin korundu.
+ *     NOT: Decode_Line / Parse_Int / Tokenize / Track_Sequence mantigi
+ *     DEGISMEDI — yalnizca cagrildiklari baglam (ISR → main) degisti.
+ *
+ *  Duzeltmeler (v4 — frame kuyrugu):
+ *  5) Cift tampon (buffers[2] + frame_ready) yerine SPSC frame kuyrugu
+ *     (frame_q[TEL_FRAME_Q_DEPTH]). Eski tasarimda tek main turunda iki
+ *     satir decode edilirse ikincisi dusuyordu (overflow_drop). Kuyruk
+ *     derinligi ile bu kayip pratikte sifirlanir.
+ *  6) Commit_Frame artik basari (1/0) dondurur; good_packets yalnizca
+ *     kuyruga gercekten yayinlanan frame icin artar (eski kodda dusen
+ *     frame de good sayiliyordu).
+ *  7) PRIMASK kritik bolumleri kaldirildi: uretici (Process) ve tuketici
+ *     (Parse) ana baglamda, SPSC → kilit gereksiz (rx_ring ile ayni
+ *     gerekce). stm32f1xx.h include'i artik gerekli degil.
  */
 
 #include "telemetry.h"
-#include "stm32f1xx.h"   /* __disable_irq / __enable_irq icin */
 #include <stdio.h>
 #include <string.h>
 
@@ -102,29 +108,31 @@ static int Parse_Int(const char *s, uint16_t len,
 }
 
 /**
- * Commit_Frame — cift tampon (ping-pong) commit.
+ * Commit_Frame — decode edilmis frame'i SPSC kuyruga yayinlar.
  *
- * v3 NOT: Artik hem Commit_Frame hem okuma ana baglamda (main context)
- * oldugundan PRIMASK bloku teknik olarak gereksiz. Ancak ileride yeniden
- * ISR'a tasinma ihtimaline karsi ve zararsiz oldugu icin korundu.
+ * Decode_Line frame'i zaten &ctx->frame_q[fq_head]'e yazdi; burada sadece
+ * doluluk kontrolu yapilip head ilerletilir (rx_ring enqueue deseninin
+ * aynisi). Kuyruk doluysa en-yeni frame dusurulur (drop-newest) ve head
+ * ilerletilmez → o slot bir sonraki decode'da uzerine yazilir.
+ *
+ * Donus: 1 = yayinlandi, 0 = kuyruk dolu, dusuruldu.
+ *
+ * v3 NOT: Hem uretici (Process) hem tuketici (Parse) ana baglamda;
+ * SPSC oldugu icin kritik bolum (PRIMASK) GEREKMEZ. fq_head/fq_tail
+ * volatile yeterli — rx_ring ile ayni gerekce.
  */
-static inline void Commit_Frame(TelCtx_t *ctx)
+static inline uint8_t Commit_Frame(TelCtx_t *ctx)
 {
-    uint32_t primask = __get_PRIMASK();
-    __disable_irq();
+    uint8_t next = (uint8_t)((ctx->fq_head + 1U) & TEL_FRAME_Q_MASK);
 
-    if (!ctx->frame_ready)
+    if (next == ctx->fq_tail)
     {
-        ctx->read_idx    = ctx->write_idx;
-        ctx->write_idx  ^= 1U;
-        ctx->frame_ready = 1U;
-    }
-    else
-    {
-        ctx->stats.overflow_drop++;
+        ctx->stats.overflow_drop++;   /* kuyruk dolu — ana dongu yetisemedi */
+        return 0U;
     }
 
-    __set_PRIMASK(primask);
+    ctx->fq_head = next;              /* yayinla */
+    return 1U;
 }
 
 /** Sequence numarasinda gap / duplicate / stale tespiti. */
@@ -202,8 +210,8 @@ static void Decode_Line(TelCtx_t *ctx, const uint8_t *buf, uint16_t len)
 
     Track_Sequence(ctx, (uint32_t)v_seq);
 
-    /* Ping-pong write slot'una yaz */
-    TelData_t *d = &ctx->buffers[ctx->write_idx];
+    /* Kuyrukta bir sonraki bos slot'a (fq_head) yaz */
+    TelData_t *d = &ctx->frame_q[ctx->fq_head];
     d->protocol_version     = (uint8_t) v_ver;
     d->sequence             = (uint32_t)v_seq;
     d->motor_rpm            = (uint16_t)v_rpm;
@@ -219,8 +227,10 @@ static void Decode_Line(TelCtx_t *ctx, const uint8_t *buf, uint16_t len)
     d->bms_error_flags      = (uint8_t) v_berr;
     d->bms_data_valid       = (uint8_t) v_bv;
 
-    Commit_Frame(ctx);
-    ctx->stats.good_packets++;
+    /* Yalnizca kuyruga gercekten yayinlanabilen frame "good" sayilir.
+     * Dolu kuyrukta dusen frame Commit_Frame icinde overflow_drop'a yazilir. */
+    if (Commit_Frame(ctx))
+        ctx->stats.good_packets++;
     return;
 
 pfail:
@@ -346,31 +356,22 @@ void Telemetry_Process(TelCtx_t *ctx, uint32_t now_ms)
 
 uint8_t Telemetry_IsFrameReady(const TelCtx_t *ctx)
 {
-    return ctx ? ctx->frame_ready : 0U;
+    return ctx ? (uint8_t)(ctx->fq_head != ctx->fq_tail) : 0U;
 }
 
 /**
- * BUG #2 DUZELTME: Telemetry_Parse — frame_ready = 0 atamasi.
- * v3: Commit artik ana baglamda ama PRIMASK korundu (zararsiz, ileride
- * ISR'a tasinirsa guvenli).
+ * Telemetry_Parse — kuyrugun en eski frame'ini cikar (FIFO).
+ * SPSC tuketicisi: yalnizca fq_tail'i ilerletir. Kilit gerekmez.
  */
 TelStatus_t Telemetry_Parse(TelCtx_t *ctx, TelData_t *out)
 {
     if (!ctx || !out) return TEL_ERR_NULL;
 
-    uint32_t primask = __get_PRIMASK();
-    __disable_irq();
+    if (ctx->fq_head == ctx->fq_tail)
+        return TEL_NO_DATA;            /* kuyruk bos */
 
-    if (!ctx->frame_ready)
-    {
-        __set_PRIMASK(primask);
-        return TEL_NO_DATA;
-    }
-
-    *out = ctx->buffers[ctx->read_idx];
-    ctx->frame_ready = 0U;
-
-    __set_PRIMASK(primask);
+    *out = ctx->frame_q[ctx->fq_tail];
+    ctx->fq_tail = (uint8_t)((ctx->fq_tail + 1U) & TEL_FRAME_Q_MASK);
     return TEL_VALID;
 }
 
