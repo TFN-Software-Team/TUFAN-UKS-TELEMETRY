@@ -5,7 +5,7 @@
   * @brief          : UKS Yer Istasyonu — AKS protokolu entegre.
   *
   *  Duzeltmeler:
-  *  BUG #4 : printf → USART1 yonlendirmesi (_write / __io_putchar)
+  *  BUG #4 : printf → USART1 yonlendirmesi (__io_putchar)
   *  BUG #5 : E-STOP TX timeout 50 ms
   *  BUG #6 : Klon-guvenli saat — HSI 8 MHz, PLL yok
   *  BUG #7 : USART1 115200 baud (9600'de dashboard 730 ms sürüyordu)
@@ -14,6 +14,19 @@
   *           alinip E32_CFG_* degerleri flash'a kalici olarak yazilir.
   *           Eski kodda bu pinler floating kaliyor, modul mod belirsiz
   *           hale geliyordu → rx_byte = 0.
+  *
+  *  YENI DUZELTMELER:
+  *  FIX-A (KRITIK): E-STOP artik Lora_SendCritical ile gonderiliyor.
+  *           Eski kod dogrudan HAL_UART_Transmit cagiriyordu; bu, devam
+  *           eden IT-tabanli RX ile cakisip telemetri akisini donduruyor
+  *           ve AUX-busy durumunda E-STOP dusebiliyordu. Yeni yol IT-RX'i
+  *           guvenli durdurup TX yapar, sonra RX'i yeniden baslatir;
+  *           AUX bloklamaz. Gonderim basarisizsa tekrar denenir.
+  *  FIX-B : _write() kaldirildi. syscalls.c ile cift-tanim cakismasi
+  *           riskini ortadan kaldirmak icin yalnizca __io_putchar birakildi.
+  *  FIX-C : Dashboard her frame yerine her DASH_EVERY_N frame'de bir
+  *           basiliyor. Tum frame'ler yine parse edilir; sadece blocking
+  *           ekran ciktisi seyreltilir, RX'e nefes alani birakilir.
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -43,6 +56,10 @@ static uint32_t         last_button_press = (uint32_t)(-2000);
 
 static volatile uint8_t estop_tx_pending  = 0;
 
+/* FIX-C: dashboard throttle — her DASH_EVERY_N frame'de bir bas */
+#define DASH_EVERY_N   3U
+static uint32_t         dash_frame_counter = 0;
+
 /* ========== Prototip ========== */
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
@@ -50,20 +67,14 @@ static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
 
 /* ====================================================================
- * BUG #4 DUZELTME: printf → USART1 yonlendirmesi.
+ * BUG #4 / FIX-B DUZELTME: printf → USART1 yonlendirmesi.
+ * Yalnizca __io_putchar; _write KALDIRILDI (syscalls.c cakismasi onlendi).
  * ==================================================================== */
 int __io_putchar(int ch)
 {
     uint8_t c = (uint8_t)ch;
     HAL_UART_Transmit(&huart1, &c, 1, 200);
     return ch;
-}
-
-int _write(int file, char *ptr, int len)
-{
-    (void)file;
-    HAL_UART_Transmit(&huart1, (uint8_t *)ptr, (uint16_t)len, 200);
-    return len;
 }
 
 /* ====================================================================
@@ -101,7 +112,9 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 }
 
 /* ====================================================================
- * BUG #5 DUZELTME: E-STOP TX — 50 ms timeout.
+ * FIX-A DUZELTME: E-STOP TX — Lora_SendCritical ile.
+ * IT-RX guvenli durdurulur/yeniden baslatilir, AUX bloklamaz.
+ * Gonderim basarisizsa pending tekrar set edilir (yeniden dene).
  * ==================================================================== */
 static void process_estop_tx(void)
 {
@@ -111,8 +124,8 @@ static void process_estop_tx(void)
     uint8_t buf[TEL_ESTOP_BURST_COUNT];
     uint8_t n = Telemetry_EncodeEStopBurst(buf, sizeof(buf));
 
-    HAL_StatusTypeDef hs = HAL_UART_Transmit(lora_ctx.huart, buf, n, 50U);
-    if (hs == HAL_OK)
+    LoraStatus_t ls = Lora_SendCritical(&lora_ctx, buf, n);
+    if (ls == LORA_OK)
     {
         tel_ctx.stats.estop_tx_count++;
         printf("\r\n!!! E-STOP -> AKS (0xA1 x%u) gonderildi !!!\r\n\r\n",
@@ -120,7 +133,9 @@ static void process_estop_tx(void)
     }
     else
     {
-        printf("\r\n!! E-STOP gonderilemedi (HAL=%d) !!\r\n\r\n", (int)hs);
+        estop_tx_pending = 1U;   /* kritik: bir sonraki dongude tekrar dene */
+        printf("\r\n!! E-STOP TX hatasi (ls=%d) — tekrar denenecek !!\r\n\r\n",
+               (int)ls);
     }
 }
 
@@ -196,15 +211,27 @@ int main(void)
                    (unsigned long)s->seq_gaps);
         }
 
+        /* FIX (v3): Ring buffer'daki ham byte'lari ISLE.
+         * Parse/decode artik burada (main context) yapilir; ISR sadece
+         * ring'e yaziyor. Bu cagri Tick'ten ONCE olmali ki bu turda gelen
+         * byte'lar islensin, ardindan yarim-satir timeout'u dogru hesaplansin. */
+        Telemetry_Process(&tel_ctx, now);
+
         /* Yarim satir timeout kontrolu */
         Telemetry_Tick(&tel_ctx, now);
 
-        /* Hazir frame varsa dashboard'u guncelle */
+        /* Hazir frame varsa: her zaman PARSE et, ekrani throttle'la bas */
         if (Telemetry_IsFrameReady(&tel_ctx))
         {
             TelData_t   d;
             TelStatus_t st = Telemetry_Parse(&tel_ctx, &d);
-            Telemetry_PrintDashboard(&d, st, Telemetry_IsEStopActive(&tel_ctx));
+
+            /* FIX-C: ekran ciktisini seyrelt — RX'e nefes alani */
+            if ((++dash_frame_counter % DASH_EVERY_N) == 0U)
+            {
+                Telemetry_PrintDashboard(&d, st,
+                                         Telemetry_IsEStopActive(&tel_ctx));
+            }
         }
     }
 }
@@ -274,12 +301,26 @@ static void MX_GPIO_Init(void)
     g.Speed = GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(MOTOR_EN_GPIO_Port, &g);
 
-    /* EXTI0 (E-STOP) — en yuksek oncelik */
-    HAL_NVIC_SetPriority(EXTI0_IRQn, 0, 0);
+    /* ====================================================================
+     * FIX-D (DEADLOCK ONLEME): Kesme oncelikleri.
+     *
+     * HAL_UART_Transmit/Receive timeout olcumu icin HAL_GetTick() kullanir;
+     * bu sayaci SysTick kesmesi artirir. Eger bir UART islemi, SysTick'ten
+     * YUKSEK oncelikli bir kesme (orn. EXTI0) icinde kilitlenirse SysTick
+     * araya giremez, tick artmaz, timeout asla dolmaz → deadlock.
+     *
+     * Bu kodda E-STOP ISR'i Transmit cagirmiyor (sadece bayrak set ediyor),
+     * yani deadlock zaten olusmaz. Yine de kusak+aski: SysTick en yuksekte
+     * (0) kalir, EXTI0=1, USART2=2. Boylece SysTick her zaman ilerler.
+     * ==================================================================== */
+    HAL_NVIC_SetPriority(SysTick_IRQn, 0, 0);   /* tick her zaman ilerlesin */
+
+    /* EXTI0 (E-STOP) — SysTick'ten dusuk ama USART'tan yuksek */
+    HAL_NVIC_SetPriority(EXTI0_IRQn, 1, 0);
     HAL_NVIC_EnableIRQ(EXTI0_IRQn);
 
-    /* USART2 interrupt — EXTI'den dusuk oncelik */
-    HAL_NVIC_SetPriority(USART2_IRQn, 1, 0);
+    /* USART2 interrupt — en dusuk (RX byte'lari ring'e duser, acele yok) */
+    HAL_NVIC_SetPriority(USART2_IRQn, 2, 0);
     HAL_NVIC_EnableIRQ(USART2_IRQn);
 }
 

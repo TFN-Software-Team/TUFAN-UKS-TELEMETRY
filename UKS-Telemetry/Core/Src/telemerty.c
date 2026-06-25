@@ -10,6 +10,23 @@
  *  3) Telemetry_Tick: LINE_IDLE durumunda last_rx_ms sifirlanmiyordu,
  *     bu timeout saatini yanlis sifirliyor ve LINE_COLLECT'e girer
  *     girmez timeout'u uzatiyordu. IDLE branch'i kaldirildi.
+ *
+ *  Duzeltmeler (v3 — ISR yuku azaltildi):
+ *  4) ISR'da parse YAPILMIYOR. Telemetry_RxBytePush artik sadece gelen
+ *     byte'i dairesel tampona (ring buffer) yazar. Eski byte-isleme
+ *     mantigi (satir birlestirme + Decode_Line) Telemetry_Process'e
+ *     tasindi ve ana donguden cagriliyor.
+ *
+ *     Gerekce: HSI 8 MHz'de (klon-guvenli saat) Decode_Line en kotu
+ *     senaryoda ~1 ms surebiliyor; 9600 baud byte penceresi (~1.04 ms)
+ *     ile cakisip Overrun (ORE) riski doguruyordu. Artik ISR sabit ve
+ *     mikrosaniye seviyesinde; parse suresi kritik degil cunku ring
+ *     buffer arka planda dolmaya devam eder.
+ *
+ *     NOT: Decode_Line / Parse_Int / Tokenize / Commit_Frame / Track_Sequence
+ *     mantigi DEGISMEDI — yalnizca cagrildiklari baglam (ISR → main) degisti.
+ *     Commit_Frame'deki PRIMASK bloku artik teknik olarak gereksiz (Process
+ *     ve ana dongu ayni baglamda) ama zararsiz oldugu icin korundu.
  */
 
 #include "telemetry.h"
@@ -85,17 +102,11 @@ static int Parse_Int(const char *s, uint16_t len,
 }
 
 /**
- * BUG #1 DUZELTME: Commit_Frame — ISR ile main loop arasindaki
- * race condition.
+ * Commit_Frame — cift tampon (ping-pong) commit.
  *
- * Onceki kod uc ayri volatile write yapiyordu (read_idx, write_idx,
- * frame_ready) ve bunlar Cortex-M3'te atomik degildi. Main loop tam
- * arasindan okursa tutarsiz state goruyordu.
- *
- * Duzeltme: PRIMASK ile kisaca IRQ'yu devre disi birakip uc atama
- * atomik blok haline getirildi. Blok sadece uc register atamasi oldugu
- * icin suresi < 1 us — UART byte suresinin (9600 baud = ~1 ms) cok
- * altinda.
+ * v3 NOT: Artik hem Commit_Frame hem okuma ana baglamda (main context)
+ * oldugundan PRIMASK bloku teknik olarak gereksiz. Ancak ileride yeniden
+ * ISR'a tasinma ihtimaline karsi ve zararsiz oldugu icin korundu.
  */
 static inline void Commit_Frame(TelCtx_t *ctx)
 {
@@ -216,38 +227,13 @@ pfail:
     ctx->stats.parse_fail++;
 }
 
-/* ========== Encoder ========== */
-
-uint8_t Telemetry_EncodeCommand(uint8_t cmd_byte,
-                                uint8_t *out_buf, size_t max_len)
+/**
+ * Tek bir ham byte'i satir tamponuna isler (eski RxBytePush govdesi).
+ * v3: Artik ISR'dan DEGIL, Telemetry_Process icinden (main context)
+ * cagriliyor. Satir tamamlaninca Decode_Line burada calisir.
+ */
+static void Process_Byte(TelCtx_t *ctx, uint8_t b, uint32_t now_ms)
 {
-    if (!out_buf || max_len < 1U) return 0U;
-    out_buf[0] = cmd_byte;
-    return 1U;
-}
-
-uint8_t Telemetry_EncodeEStopBurst(uint8_t *out_buf, size_t max_len)
-{
-    if (!out_buf || max_len < TEL_ESTOP_BURST_COUNT) return 0U;
-    for (uint8_t i = 0; i < TEL_ESTOP_BURST_COUNT; i++)
-        out_buf[i] = UKS_CMD_EMERGENCY_STOP;
-    return TEL_ESTOP_BURST_COUNT;
-}
-
-/* ========== Decoder API ========== */
-
-void Telemetry_Init(TelCtx_t *ctx)
-{
-    if (!ctx) return;
-    memset(ctx, 0, sizeof(*ctx));
-    ctx->line_state = LINE_IDLE;
-}
-
-void Telemetry_RxBytePush(TelCtx_t *ctx, uint8_t b, uint32_t now_ms)
-{
-    if (!ctx) return;
-
-    ctx->stats.rx_bytes++;
     ctx->last_rx_ms = now_ms;
 
     if (b == '\r') return;   /* CR atilir */
@@ -276,17 +262,97 @@ void Telemetry_RxBytePush(TelCtx_t *ctx, uint8_t b, uint32_t now_ms)
     }
 }
 
+/* ========== Encoder ========== */
+
+uint8_t Telemetry_EncodeCommand(uint8_t cmd_byte,
+                                uint8_t *out_buf, size_t max_len)
+{
+    if (!out_buf || max_len < 1U) return 0U;
+    out_buf[0] = cmd_byte;
+    return 1U;
+}
+
+uint8_t Telemetry_EncodeEStopBurst(uint8_t *out_buf, size_t max_len)
+{
+    if (!out_buf || max_len < TEL_ESTOP_BURST_COUNT) return 0U;
+    for (uint8_t i = 0; i < TEL_ESTOP_BURST_COUNT; i++)
+        out_buf[i] = UKS_CMD_EMERGENCY_STOP;
+    return TEL_ESTOP_BURST_COUNT;
+}
+
+/* ========== Decoder API ========== */
+
+void Telemetry_Init(TelCtx_t *ctx)
+{
+    if (!ctx) return;
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->line_state = LINE_IDLE;
+}
+
+/**
+ * BUG #4 (v3) DUZELTME: ISR yuku.
+ * Bu fonksiyon ISR'dan cagrilir ve artik SADECE gelen byte'i ring
+ * buffer'a yazar. Parse/tokenize/decode YAPMAZ → ISR sabit-zamanli.
+ *
+ * Tek-uretici (ISR) / tek-tuketici (Process) deseni: yalnizca rx_head
+ * ISR'da yazilir, rx_tail ana donguda. head volatile oldugu icin kilit
+ * gerekmez. Ring doluysa byte dusurulur (ring_overflow sayilir) — ama
+ * 256 byte tampon 9600 baud'da ~266 ms veri tutar, ana dongu rahatca
+ * yetisir.
+ *
+ * NOT: last_rx_ms burada DEGIL, byte ana donguda islenirken guncellenir
+ * (Process_Byte icinde). Boylece timeout saati gercek isleme anini
+ * yansitir.
+ */
+void Telemetry_RxBytePush(TelCtx_t *ctx, uint8_t b, uint32_t now_ms)
+{
+    (void)now_ms;   /* zaman damgasi ana donguda atilir */
+    if (!ctx) return;
+
+    ctx->stats.rx_bytes++;
+
+    uint16_t head = ctx->rx_head;
+    uint16_t next = (uint16_t)((head + 1U) & TEL_RX_RING_MASK);
+
+    if (next == ctx->rx_tail)
+    {
+        /* Ring dolu — ana dongu yetisememis. Byte dusur. */
+        ctx->stats.ring_overflow++;
+        return;
+    }
+
+    ctx->rx_ring[head] = b;
+    ctx->rx_head = next;
+}
+
+/**
+ * v3 YENI: Ring buffer'daki bekleyen tum byte'lari isler.
+ * ANA DONGUDEN her tur cagrilmali. Agir is (parse) burada yapilir.
+ */
+void Telemetry_Process(TelCtx_t *ctx, uint32_t now_ms)
+{
+    if (!ctx) return;
+
+    /* ISR'in o anki head'ini bir kez oku (volatile snapshot) */
+    uint16_t head = ctx->rx_head;
+
+    while (ctx->rx_tail != head)
+    {
+        uint8_t b = ctx->rx_ring[ctx->rx_tail];
+        ctx->rx_tail = (uint16_t)((ctx->rx_tail + 1U) & TEL_RX_RING_MASK);
+        Process_Byte(ctx, b, now_ms);
+    }
+}
+
 uint8_t Telemetry_IsFrameReady(const TelCtx_t *ctx)
 {
     return ctx ? ctx->frame_ready : 0U;
 }
 
 /**
- * BUG #2 DUZELTME: Telemetry_Parse — frame_ready = 0 atamasi ISR-unsafe.
- *
- * ISR Commit_Frame'i cagirir, main loop Telemetry_Parse'i cagiriyorsa
- * frame_ready'nin sifirlanmasi da critical section icinde olmali;
- * aksi halde ISR tam arasindan frame'i kaybedebilir.
+ * BUG #2 DUZELTME: Telemetry_Parse — frame_ready = 0 atamasi.
+ * v3: Commit artik ana baglamda ama PRIMASK korundu (zararsiz, ileride
+ * ISR'a tasinirsa guvenli).
  */
 TelStatus_t Telemetry_Parse(TelCtx_t *ctx, TelData_t *out)
 {
@@ -310,14 +376,8 @@ TelStatus_t Telemetry_Parse(TelCtx_t *ctx, TelData_t *out)
 
 /**
  * BUG #3 DUZELTME: Telemetry_Tick — LINE_IDLE'da last_rx_ms yanlislikla
- * sifirlaniyordu.
- *
- * Onceki kod LINE_IDLE durumunda `ctx->last_rx_ms = now_ms` yapiyordu.
- * Bu, IDLE'dayken saati surekli tazeliyordu ve LINE_COLLECT'e gecince
- * timeout sayaci yeni basliyordu (ilk byte'tan sonra 500 ms degil,
- * son IDLE guncellenmesinden bu yana 500 ms). Bu durumda yarim satirlar
- * hic droplanmiyordu. Duzeltme: IDLE branch'i tamamen kaldirildi;
- * last_rx_ms sadece RxBytePush icinde guncellenir.
+ * sifirlaniyordu. IDLE branch'i kaldirildi; last_rx_ms sadece byte
+ * islenirken (Process_Byte) guncellenir.
  */
 void Telemetry_Tick(TelCtx_t *ctx, uint32_t now_ms)
 {
@@ -469,6 +529,7 @@ void Telemetry_PrintStats(const TelCtx_t *ctx)
     printf("  Timeout/overflow: %lu / %lu\r\n",
            (unsigned long)s->timeout_drop,
            (unsigned long)s->overflow_drop);
+    printf("  Ring overflow   : %lu\r\n", (unsigned long)s->ring_overflow);
     printf("  Gecerli pkt     : %lu\r\n", (unsigned long)s->good_packets);
     printf("  Seq gap         : %lu\r\n", (unsigned long)s->seq_gaps);
     printf("  Seq dup/stale   : %lu\r\n", (unsigned long)s->seq_dup_or_stale);

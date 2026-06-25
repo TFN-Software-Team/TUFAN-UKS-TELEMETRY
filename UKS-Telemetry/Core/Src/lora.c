@@ -12,6 +12,15 @@
  *         icin 200 ms yetersizdi; 500 ms ile guvenli marj.
  *  FIX-3: Config modu girisinde huart parametresi artik kullaniliyor
  *         (RX tampon temizleme icin).
+ *
+ *  FIX-4 (KRITIK): Half-duplex TX/RX cakismasi.
+ *         USART2 uzerinde HAL_UART_Receive_IT ile byte-byte RX surerken
+ *         dogrudan HAL_UART_Transmit cagrilirsa HAL __HAL_LOCK yuzunden
+ *         TX HAL_BUSY donebilir ya da devam eden RX bozulur. Sonuc:
+ *         komut/E-STOP gonderince telemetri akisi donuyor / byte kayboluyor.
+ *         Cozum: Lora_Send/Lora_SendCritical icinde TX oncesi IT-RX abort,
+ *         TX, ardindan IT-RX yeniden arm. rx_active bayragi ile takip.
+ *  FIX-5: E-STOP best-effort gonderim (Lora_SendCritical) — AUX bloklamaz.
  */
 
 #include "lora.h"
@@ -157,9 +166,10 @@ LoraStatus_t Lora_Init(LoraCtx_t *ctx, UART_HandleTypeDef *huart)
 {
     if (!ctx || !huart) return LORA_ERR;
 
-    ctx->huart   = huart;
-    ctx->rx_cb   = NULL;
-    ctx->rx_user = NULL;
+    ctx->huart     = huart;
+    ctx->rx_cb     = NULL;
+    ctx->rx_user   = NULL;
+    ctx->rx_active = 0U;          /* FIX-4: henuz RX baslamadi */
 
     /* 1. GPIO hazirla */
     E32_GPIO_Init();
@@ -202,21 +212,65 @@ LoraStatus_t Lora_StartReceive(LoraCtx_t *ctx)
     if (HAL_UART_Receive_IT(ctx->huart, &ctx->rx_byte_buf, 1) != HAL_OK)
         return LORA_ERR;
 
+    ctx->rx_active = 1U;          /* FIX-4 */
     return LORA_OK;
+}
+
+/* =========================================================================
+ * FIX-4 / FIX-5: TX-safe cekirdek.
+ *
+ *  1. (varsa) devam eden IT-RX'i abort et — TX ile cakismayi onler
+ *  2. Bloklayan TX yap
+ *  3. RX onceden aktifse yeniden arm et
+ *
+ *  block_aux=1 : AUX HIGH beklenir, timeout'ta LORA_ERR_BUSY (normal veri)
+ *  block_aux=0 : AUX kisa beklenir, timeout olsa bile gonderir (kritik)
+ * ========================================================================= */
+static LoraStatus_t Lora_TxSafe(LoraCtx_t *ctx, const uint8_t *data,
+                                uint16_t len, uint8_t block_aux,
+                                uint32_t tx_timeout_ms)
+{
+    if (!ctx || !ctx->huart || !data || len == 0U) return LORA_ERR;
+
+    LoraStatus_t result = LORA_OK;
+    uint8_t was_rx = ctx->rx_active;
+
+    /* AUX kontrolu */
+    if (block_aux) {
+        if (E32_WaitAuxHigh(200U) != LORA_OK)
+            return LORA_ERR_BUSY;            /* normal veri: mesgulse atla */
+    } else {
+        (void)E32_WaitAuxHigh(50U);          /* kritik: timeout olsa da devam */
+    }
+
+    /* 1. IT-RX'i guvenli durdur */
+    if (was_rx) {
+        HAL_UART_AbortReceive_IT(ctx->huart);
+        ctx->rx_active = 0U;
+    }
+
+    /* 2. Bloklayan TX */
+    if (HAL_UART_Transmit(ctx->huart, (uint8_t *)data, len, tx_timeout_ms)
+            != HAL_OK)
+        result = LORA_ERR;
+
+    /* 3. RX'i yeniden baslat (onceden aktifse) */
+    if (was_rx) {
+        if (Lora_StartReceive(ctx) != LORA_OK)
+            result = LORA_ERR;
+    }
+
+    return result;
 }
 
 LoraStatus_t Lora_Send(LoraCtx_t *ctx, const uint8_t *data, uint16_t len)
 {
-    if (!ctx || !ctx->huart || !data || len == 0U) return LORA_ERR;
+    return Lora_TxSafe(ctx, data, len, /*block_aux=*/1U, /*tx_to=*/1000U);
+}
 
-    /* TX oncesi AUX HIGH garantisi (modul mesgulse bekle) */
-    if (E32_WaitAuxHigh(200U) != LORA_OK)
-        return LORA_ERR_BUSY;
-
-    if (HAL_UART_Transmit(ctx->huart, (uint8_t *)data, len, 1000U) != HAL_OK)
-        return LORA_ERR;
-
-    return LORA_OK;
+LoraStatus_t Lora_SendCritical(LoraCtx_t *ctx, const uint8_t *data, uint16_t len)
+{
+    return Lora_TxSafe(ctx, data, len, /*block_aux=*/0U, /*tx_to=*/100U);
 }
 
 void Lora_OnUartRxCplt(LoraCtx_t *ctx, UART_HandleTypeDef *huart)
@@ -227,7 +281,10 @@ void Lora_OnUartRxCplt(LoraCtx_t *ctx, UART_HandleTypeDef *huart)
         ctx->rx_cb(ctx->rx_byte_buf, HAL_GetTick(), ctx->rx_user);
 
     /* Bir sonraki byte icin interrupt'i yeniden arm et */
-    HAL_UART_Receive_IT(ctx->huart, &ctx->rx_byte_buf, 1);
+    if (HAL_UART_Receive_IT(ctx->huart, &ctx->rx_byte_buf, 1) == HAL_OK)
+        ctx->rx_active = 1U;
+    else
+        ctx->rx_active = 0U;
 }
 
 void Lora_OnUartError(LoraCtx_t *ctx, UART_HandleTypeDef *huart)
@@ -240,5 +297,8 @@ void Lora_OnUartError(LoraCtx_t *ctx, UART_HandleTypeDef *huart)
     __HAL_UART_CLEAR_FEFLAG(huart);
 
     /* Interrupt'i yeniden arm et */
-    HAL_UART_Receive_IT(ctx->huart, &ctx->rx_byte_buf, 1);
+    if (HAL_UART_Receive_IT(ctx->huart, &ctx->rx_byte_buf, 1) == HAL_OK)
+        ctx->rx_active = 1U;
+    else
+        ctx->rx_active = 0U;
 }

@@ -73,6 +73,7 @@ typedef struct {
     LoraRxCb_t          rx_cb;
     void               *rx_user;
     uint8_t             rx_byte_buf;  /* 1-byte IT RX tamponu */
+    volatile uint8_t    rx_active;    /* FIX-4: IT-RX su an arm'li mi (TX-safe icin) */
 } LoraCtx_t;
 
 /* =========================================================================
@@ -98,10 +99,19 @@ void         Lora_SetRxByteHandler(LoraCtx_t *ctx, LoraRxCb_t cb, void *user);
 LoraStatus_t Lora_StartReceive(LoraCtx_t *ctx);
 
 /**
- * @brief  Veri gonder. TX oncesi AUX HIGH beklenir.
+ * @brief  Normal veri/komut gonder. TX oncesi devam eden IT-RX guvenli
+ *         durdurulur, TX sonrasi yeniden baslatilir (FIX-4). AUX HIGH
+ *         beklenir; modul mesgulse LORA_ERR_BUSY doner.
  * @retval LORA_ERR_BUSY AUX 200 ms icinde HIGH gelmedi (modul mesgul)
  */
 LoraStatus_t Lora_Send        (LoraCtx_t *ctx, const uint8_t *data, uint16_t len);
+
+/**
+ * @brief  KRITIK gonderim (E-STOP). AUX'u kisa bekler ama timeout olsa
+ *         bile best-effort gonderir (FIX-5). IT-RX yine guvenli yonetilir.
+ *         En kritik komutun AUX-busy yuzunden dusmesini onler.
+ */
+LoraStatus_t Lora_SendCritical(LoraCtx_t *ctx, const uint8_t *data, uint16_t len);
 
 /** HAL_UART_RxCpltCallback icinden cagrilmali. */
 void Lora_OnUartRxCplt(LoraCtx_t *ctx, UART_HandleTypeDef *huart);

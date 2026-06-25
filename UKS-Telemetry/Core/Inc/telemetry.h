@@ -13,10 +13,14 @@
  *      0xA3 = STOP
  *      0xA4 = DRIVE_ENABLE
  *
- *  Mimari:
- *  - Cift tampon (ping-pong) TelData_t — ISR yazarken ana dongu okur.
- *  - Satir tamponu tek (line_buf) — ISR icinde byte byte doldurulur.
- *    Satir tamamlaninca (\n) ISR icinde parse + range check + commit.
+ *  Mimari (v3 — ISR yuku azaltildi):
+ *  - ISR (Telemetry_RxBytePush) artik SADECE ham byte'i dairesel tampona
+ *    (ring buffer) yazar ve cikar. Hicbir parse/tokenize ISR'da yapilmaz.
+ *    Boylece ISR suresi her byte icin sabit ve mikrosaniye seviyesinde
+ *    kalir → 8 MHz HSI'da bile Overrun (ORE) riski pratikte sifirlanir.
+ *  - Satir birlestirme + parse + range check + commit, ana donguden
+ *    cagrilan Telemetry_Process() icinde (main context) yapilir.
+ *  - Cift tampon (ping-pong) TelData_t — Process yazar, ana dongu okur.
  *  - Sequence numarasi izlenir; gap/duplicate sayilari stats'a yazilir.
  *  - E-STOP UKS'te lokal latch'lenir (AKS bu komutu UKS'e yansitmaz).
  */
@@ -36,6 +40,12 @@
 #define TEL_LINE_MAX_LEN        128U     /* CRLF dahil maksimum satir */
 #define TEL_PARTIAL_TIMEOUT_MS  500U     /* Yarim satirin atilma suresi */
 #define TEL_PROTOCOL_VERSION    1U
+
+/* RX ring buffer boyutu. 2'nin kuvveti olmali (maske ile sarma).
+ * 256 byte: 9600 baud'da ~266 ms'lik veriyi tamponlar — ana dongu
+ * dashboard basarken (60 ms) bile rahatca yetisilir. */
+#define TEL_RX_RING_SIZE        256U
+#define TEL_RX_RING_MASK        (TEL_RX_RING_SIZE - 1U)
 
 /* UKS -> AKS komut byte'lari (UKS_LoRa_Protocol.md ile birebir) */
 #define UKS_CMD_EMERGENCY_STOP  0xA1U
@@ -102,6 +112,7 @@ typedef struct {
     uint32_t range_fail;
     uint32_t timeout_drop;     /* Yarim satir timeout */
     uint32_t overflow_drop;    /* Satir tamponu doldu / frame slot dolu */
+    uint32_t ring_overflow;    /* RX ring buffer doldu (ana dongu yetisemedi) */
     uint32_t good_packets;
     uint32_t seq_gaps;         /* Beklenenin uzerinde atlama */
     uint32_t seq_dup_or_stale; /* Ayni veya geri giden sira */
@@ -112,12 +123,19 @@ typedef struct {
 typedef void (*TelEStopCb_t)(void *user);
 
 typedef struct {
-    /* ASCII satir parser tamponu */
+    /* ---- RX ring buffer (ISR write, main read) ----
+     * ISR sadece head'e yazar; ana dongu (Telemetry_Process) tail'den okur.
+     * Tek-uretici/tek-tuketici → kilit gerekmez (head volatile yeterli). */
+    uint8_t          rx_ring[TEL_RX_RING_SIZE];
+    volatile uint16_t rx_head;   /* ISR yazar */
+    uint16_t          rx_tail;   /* ana dongu okur */
+
+    /* ASCII satir parser tamponu (artik ana donguden kullanilir) */
     LineState_t line_state;
     uint16_t    line_len;
     uint8_t     line_buf[TEL_LINE_MAX_LEN];
 
-    /* Cift tampon — ISR write, main read */
+    /* Cift tampon — Process write, main read */
     TelData_t        buffers[2];
     volatile uint8_t write_idx;
     volatile uint8_t read_idx;
@@ -133,7 +151,7 @@ typedef struct {
     void            *estop_cb_user;
 
     TelStats_t stats;
-    uint32_t   last_rx_ms;
+    uint32_t   last_rx_ms;       /* son byte'in ana donguda islenme zamani */
 } TelCtx_t;
 
 /* ========== Encoder (UKS -> AKS) ========== */
@@ -149,9 +167,14 @@ uint8_t Telemetry_EncodeEStopBurst(uint8_t *out_buf, size_t max_len);
 
 void        Telemetry_Init        (TelCtx_t *ctx);
 
-/** RX byte'ini ISR icinden besle. Satir tamamlandiginda parse + commit
- *  ayni cagri icinde yapilir. */
+/** RX byte'ini ISR icinden besle. SADECE ring buffer'a yazar — parse YAPMAZ.
+ *  ISR-safe, sabit-zamanli (mikrosaniye). */
 void        Telemetry_RxBytePush  (TelCtx_t *ctx, uint8_t rx_byte, uint32_t now_ms);
+
+/** Ring buffer'daki bekleyen byte'lari isler: satir birlestirme + parse +
+ *  range check + commit. ANA DONGUDEN periyodik cagir (main context).
+ *  Tum agir is burada yapilir; ISR yuku minimumda tutulur. */
+void        Telemetry_Process     (TelCtx_t *ctx, uint32_t now_ms);
 
 uint8_t     Telemetry_IsFrameReady(const TelCtx_t *ctx);
 
