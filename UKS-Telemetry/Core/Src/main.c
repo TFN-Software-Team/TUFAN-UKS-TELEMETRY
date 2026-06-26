@@ -77,6 +77,17 @@ int __io_putchar(int ch)
     return ch;
 }
 
+/* printf → _write → __io_putchar zinciri.
+ * syscalls.c'de _write tanimli degil (cakisma onlemek icin kaldirildi),
+ * bu yuzden burada tanimliyoruz. Newlib, printf icin bu fonksiyonu cagirir. */
+int _write(int file, char *ptr, int len)
+{
+    (void)file;
+    for (int i = 0; i < len; i++)
+        __io_putchar((unsigned char)ptr[i]);
+    return len;
+}
+
 /* ====================================================================
  * LoRa RX → Telemetry parser koprusu (ISR context)
  * ==================================================================== */
