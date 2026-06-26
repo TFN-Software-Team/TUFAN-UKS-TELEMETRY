@@ -169,8 +169,9 @@ int main(void)
     printf("    Saat      : HSI 8 MHz (PLL yok)\r\n");
     printf("    Monitor   : USART1 115200 baud\r\n");
     printf("    LoRa UART : USART2 9600 baud\r\n");
-    printf("    E32 ayar  : SPED=0xC2 (9600|8N1|2.4kbps) "
-           "CHAN=0x17 (433 MHz) OPTION=0x47 (30dBm|FEC)\r\n");
+    printf("    E32 ayar  : SPED=0x%02X CHAN=0x%02X OPTION=0x%02X\r\n",
+           E32_CFG_SPED, E32_CFG_CHAN, E32_CFG_OPTION);
+    printf("    (hedef: SPED=0x1A | CHAN=0x17 | OPTION=0x47)\r\n");
 
     Telemetry_Init(&tel_ctx);
 

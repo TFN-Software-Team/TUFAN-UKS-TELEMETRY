@@ -7,14 +7,27 @@
 /* =========================================================================
  * E32-433T30D Hedef Konfigürasyon
  *
- *  SPED = 0xC2
- *    bit[7:6] = 11  → UART 9600 baud   (STM / ESP ile ayni)
- *    bit[5:3] = 000 → 8N1, parity yok
+ *  SPED register bit duzeni (EBYTE E32 — DIKKAT, alanlar bu sirada):
+ *    bit[7:6] = UART parity   (00/11 = 8N1, 01 = 8O1, 10 = 8E1)
+ *    bit[5:3] = UART baud     (000=1200 001=2400 010=4800 011=9600
+ *                              100=19200 101=38400 110=57600 111=115200)
+ *    bit[2:0] = air data rate (000=0.3k 001=1.2k 010=2.4k 011=4.8k
+ *                              100=9.6k 101=19.2k ...)
+ *
+ *  SPED = 0x1A = 0001 1010
+ *    bit[7:6] = 00  → 8N1, parity yok
+ *    bit[5:3] = 011 → UART 9600 baud   (STM32 USART2 ile AYNI olmali)
  *    bit[2:0] = 010 → 2.4 kbps hava hizi
  *
- *    NOT — eski deger 0x18 = UART 1200 baud + OddParity + 0.3 kbps idi.
- *    Bu yuzden config komutu E32'ye hic ulasmiyordu (STM 9600'den
- *    konusuyordu, E32 1200'den dinliyordu).
+ *    NOT — eski deger 0xC2 = parity 8N1 + UART 1200 baud + 2.4k air idi.
+ *    Bit alanlari yanlis cozuldugu icin UART'in 9600 oldugu saniliyordu;
+ *    aslinda 1200 yaziliyordu. STM32 9600'den, E32 normal modda 1200'den
+ *    konusunca link kopuyor ve rx_byte = 0 kaliyordu.
+ *    (Config/sleep modunda E32 UART'i her zaman sabit 9600 oldugu icin
+ *    config komutunun kendisi yine de yaziliyordu — init "[OK]" donuyordu.)
+ *
+ *    NOT — daha eski deger 0x18 = 8N1 + UART 9600 + 0.3k air idi: UART
+ *    baud'u dogruydu ama air rate yanlisti.
  *
  *  CHAN = 0x17  (23 decimal)
  *    Frekans = 410 + CHAN = 410 + 23 = 433 MHz
@@ -31,14 +44,18 @@
  *
  *    NOT — eski deger 0x44 → 20 dBm (bit[1:0]=00), gereksiz guc kaybi.
  *
- *  HER IKI MODUL (AKS + UKS) AYNI SPED/CHAN/OPTION DEGERINE SAHIP OLMALI.
- *  Farkli hava hizi veya kanal → modüller birbirini duyamaz.
+ *  RF UYUMU: Iki modul birbirini duyabilmek icin AYNI air rate (SPED
+ *  bit[2:0]), AYNI CHAN ve AYNI OPTION (transparan/FEC) degerine sahip
+ *  olmali. SPED'in UART baud alani (bit[5:3]) ise YERELdir — her modulun
+ *  kendi MCU'suyla konustugu hizdir; iki modulde farkli olabilir. Yani
+ *  AKS'in UART baud'unu degistirmen gerekmez, yeter ki AKS'in kendi
+ *  MCU'su da kendi E32'siyle ayni baud'da olsun.
  *
  *  ADRES: 0x0000 — broadcast, her iki yone de paket gider.
  * ========================================================================= */
 #define E32_CFG_ADDH    0x00U
 #define E32_CFG_ADDL    0x00U
-#define E32_CFG_SPED    0xC2U   /* 9600 UART | 8N1 | 2.4 kbps air rate   */
+#define E32_CFG_SPED    0x1AU   /* 8N1 | 9600 UART | 2.4 kbps air rate    */
 #define E32_CFG_CHAN    0x17U   /* Kanal 23  | 433 MHz (ISM bandi)        */
 #define E32_CFG_OPTION  0x47U   /* Transparan | PP | 250ms | FEC | 30 dBm */
 

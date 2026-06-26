@@ -24,6 +24,7 @@
  */
 
 #include "lora.h"
+#include <stdio.h>
 
 /* =========================================================================
  * Yardimci: AUX HIGH bekle
@@ -161,6 +162,53 @@ static LoraStatus_t E32_WriteConfig(UART_HandleTypeDef *huart)
 }
 
 /* =========================================================================
+ * Lora_ReadConfig — E32 flash'indaki mevcut ayarlari oku ve yazdir.
+ *
+ *  Config modunda C1 C1 C1 gonderilir; E32 kalici ayarlari 6 byte
+ *  olarak echo'lar: [C0/C1, ADDH, ADDL, SPED, CHAN, OPTION].
+ *  Boylece "module gercekten ne yazildi" sorusu kesin cevap alir.
+ *
+ *  Lora_Init() icinde config moduna girildikten SONRA, WriteConfig
+ *  ONCESINDE cagrilan versiyonu: "yazma oncesi ne vardi" gosterir.
+ *  Yazma SONRASI tekrar cagrilirsa "ne yazildi" dogrulama saglar.
+ * ========================================================================= */
+static void Lora_ReadConfig(UART_HandleTypeDef *huart)
+{
+    const uint8_t read_cmd[3] = {0xC1U, 0xC1U, 0xC1U};
+    uint8_t resp[6] = {0};
+
+    /* Onceki artik baytlari temizle */
+    __HAL_UART_CLEAR_OREFLAG(huart);
+
+    if (HAL_UART_Transmit(huart, (uint8_t *)read_cmd, 3U, 200U) != HAL_OK) {
+        printf("[CFG] Okuma komutu gonderilemedi.\r\n");
+        return;
+    }
+
+    HAL_StatusTypeDef st = HAL_UART_Receive(huart, resp, 6U, 500U);
+    if (st != HAL_OK) {
+        printf("[CFG] Echo alinamadi (st=%d) — E32 baglantiyi kontrol et.\r\n",
+               (int)st);
+        return;
+    }
+
+    printf("[CFG] E32 mevcut ayarlar:\r\n");
+    printf("      Ham  : %02X %02X %02X %02X %02X %02X\r\n",
+           resp[0], resp[1], resp[2], resp[3], resp[4], resp[5]);
+    printf("      ADDH=0x%02X  ADDL=0x%02X\r\n", resp[1], resp[2]);
+    printf("      SPED=0x%02X  (hedef: 0x1A = 8N1|9600|2.4k)\r\n", resp[3]);
+    printf("      CHAN=0x%02X  (hedef: 0x17 = 433 MHz)\r\n",        resp[4]);
+    printf("      OPTION=0x%02X (hedef: 0x47 = 30dBm|FEC|PP)\r\n", resp[5]);
+
+    /* Kritik alanlari dogrula */
+    uint8_t ok = 1U;
+    if (resp[3] != 0x1AU) { printf("  !! SPED YANLIS — UART baud veya air rate uyumsuz!\r\n"); ok=0; }
+    if (resp[4] != 0x17U) { printf("  !! CHAN YANLIS  — RF kanal uyumsuz!\r\n");               ok=0; }
+    if (resp[5] != 0x47U) { printf("  !! OPTION YANLIS — guc/FEC uyumsuz!\r\n");              ok=0; }
+    if (ok)               { printf("  [OK] Tum alanlar hedef degerle esiyor.\r\n"); }
+}
+
+/* =========================================================================
  * Lora_Init — public API
  *
  *  1. GPIO: M0/M1 → output LOW (normal mod), AUX → input pull-up
@@ -181,6 +229,16 @@ LoraStatus_t Lora_Init(LoraCtx_t *ctx, UART_HandleTypeDef *huart)
     /* 1. GPIO hazirla */
     E32_GPIO_Init();
 
+    /* AUX TANI: boot oncesi pin durumunu goster.
+     * Eger E32 baglantiyi kontrol et mesaji cikiyorsa AUX floating olabilir. */
+    {
+        uint8_t aux_now = (HAL_GPIO_ReadPin(LORA_AUX_GPIO_Port, LORA_AUX_Pin) == GPIO_PIN_SET) ? 1U : 0U;
+        printf("[AUX] Boot oncesi AUX=%u  M0=%u  M1=%u\r\n",
+               aux_now,
+               (HAL_GPIO_ReadPin(GPIOB, E32_M0_Pin) == GPIO_PIN_SET) ? 1U : 0U,
+               (HAL_GPIO_ReadPin(GPIOB, E32_M1_Pin) == GPIO_PIN_SET) ? 1U : 0U);
+    }
+
     /* 2. Modül boot AUX HIGH bekle */
     if (E32_WaitAuxHigh(E32_AUX_BOOT_TIMEOUT_MS) != LORA_OK)
         return LORA_ERR_TIMEOUT;
@@ -189,8 +247,25 @@ LoraStatus_t Lora_Init(LoraCtx_t *ctx, UART_HandleTypeDef *huart)
     if (E32_EnterConfigMode(huart) != LORA_OK)
         return LORA_ERR_TIMEOUT;
 
+    /* Config modu sonrasi pin durumu */
+    {
+        uint8_t aux_now = (HAL_GPIO_ReadPin(LORA_AUX_GPIO_Port, LORA_AUX_Pin) == GPIO_PIN_SET) ? 1U : 0U;
+        printf("[AUX] Config modunda AUX=%u  M0=%u  M1=%u\r\n",
+               aux_now,
+               (HAL_GPIO_ReadPin(GPIOB, E32_M0_Pin) == GPIO_PIN_SET) ? 1U : 0U,
+               (HAL_GPIO_ReadPin(GPIOB, E32_M1_Pin) == GPIO_PIN_SET) ? 1U : 0U);
+    }
+
+    /* Yazma oncesi mevcut ayarlari goster */
+    printf("[CFG] --- Yazma oncesi E32 ayarlari ---\r\n");
+    Lora_ReadConfig(huart);
+
     /* 4. Ayarlari yaz */
     LoraStatus_t cfg_st = E32_WriteConfig(huart);
+
+    /* Yazma sonrasi dogrula */
+    printf("[CFG] --- Yazma sonrasi E32 ayarlari ---\r\n");
+    Lora_ReadConfig(huart);
 
     /* 5. Hata olsa da normal moda don — modul calismali */
     if (E32_EnterNormalMode() != LORA_OK)
