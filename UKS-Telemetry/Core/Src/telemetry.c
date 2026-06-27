@@ -208,6 +208,15 @@ static void Decode_Line(TelCtx_t *ctx, const uint8_t *buf, uint16_t len)
         return;
     }
 
+    /* FIX-F NOT: Track_Sequence BILEREK Commit_Frame'den ONCE ve ondan
+     * BAGIMSIZ cagrilir. Sequence izlemesi RF/hat sagligini olcer — yani
+     * "hat uzerinde gecerli olarak GORULEN" frame akisini. Eger izleme
+     * Commit basarisina baglansaydi, kuyruk doldugunda (ana dongu gecici
+     * yetisemediginde) izleme durur, kuyruk bosalinca da dusen frame'ler
+     * sahte bir seq_gap olarak raporlanirdi — bu, RF hattini saglikliyken
+     * arizali gosterir. Mevcut sira dogrudur: gecerli parse edilen her frame
+     * sequence'a sayilir; kuyruk doluluğu ayrica overflow_drop'ta izlenir.
+     * Telemetri VERISI bundan etkilenmez; yalnizca istatistik semantigi. */
     Track_Sequence(ctx, (uint32_t)v_seq);
 
     /* Kuyrukta bir sonraki bos slot'a (fq_head) yaz */
@@ -246,11 +255,27 @@ static void Process_Byte(TelCtx_t *ctx, uint8_t b, uint32_t now_ms)
 {
     ctx->last_rx_ms = now_ms;
 
+    /* LINE_OVERFLOW: tampon tasan bir satirin kuyruğundayiz.
+     * \n gorene kadar her byte'i koşulsuz cop'e at. \n gelince
+     * satir bitti, temiz bir sonraki frame'e hazirlan.
+     * Olmadan: tasan frame'in kuyrugu LINE_IDLE'da yeni frame
+     * baslangiç saniyor, \n gelince Decode_Line'a cop gonderiyor
+     * -> parse_fail flood + CPU israfi. */
+    if (ctx->line_state == LINE_OVERFLOW)
+    {
+        if (b == '\n')
+        {
+            ctx->line_len   = 0U;
+            ctx->line_state = LINE_IDLE;
+        }
+        return;   /* overflow bitmeden hicbir seyi isleme */
+    }
+
     if (b == '\r') return;   /* CR atilir */
 
     if (b == '\n')
     {
-        if (ctx->line_len > 0U)
+        if (ctx->line_len > 0U && ctx->line_state == LINE_COLLECT)
             Decode_Line(ctx, ctx->line_buf, ctx->line_len);
         ctx->line_len   = 0U;
         ctx->line_state = LINE_IDLE;
@@ -266,9 +291,11 @@ static void Process_Byte(TelCtx_t *ctx, uint8_t b, uint32_t now_ms)
     }
     else
     {
+        /* Tampon doldu. LINE_OVERFLOW'a gec; bu satirin geri kalan
+         * byte'lari bir sonraki \n'e kadar sessizce cop'e atilacak. */
         ctx->stats.overflow_drop++;
         ctx->line_len   = 0U;
-        ctx->line_state = LINE_IDLE;
+        ctx->line_state = LINE_OVERFLOW;
     }
 }
 
@@ -379,11 +406,17 @@ TelStatus_t Telemetry_Parse(TelCtx_t *ctx, TelData_t *out)
  * BUG #3 DUZELTME: Telemetry_Tick — LINE_IDLE'da last_rx_ms yanlislikla
  * sifirlaniyordu. IDLE branch'i kaldirildi; last_rx_ms sadece byte
  * islenirken (Process_Byte) guncellenir.
+ *
+ * LINE_OVERFLOW icin ek not: overflow surecinde timeout gelirse satiri
+ * terk edip IDLE'a donmek dogru. Process_Byte'taki overflow akisi \n
+ * bekler ama hat kesilirse \n gelmeyebilir; timeout bunu temizler.
  */
 void Telemetry_Tick(TelCtx_t *ctx, uint32_t now_ms)
 {
     if (!ctx) return;
-    if (ctx->line_state == LINE_IDLE) return;   /* beklenecek bir sey yok */
+    /* LINE_IDLE: beklenecek bir sey yok. LINE_OVERFLOW: aktifte sayilir,
+     * timeout ile temizlenebilir. */
+    if (ctx->line_state == LINE_IDLE) return;
 
     if ((now_ms - ctx->last_rx_ms) >= TEL_PARTIAL_TIMEOUT_MS)
     {

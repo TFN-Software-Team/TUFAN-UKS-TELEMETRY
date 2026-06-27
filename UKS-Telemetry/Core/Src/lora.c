@@ -142,7 +142,10 @@ static LoraStatus_t E32_WriteConfig(UART_HandleTypeDef *huart)
     if (HAL_UART_Receive(huart, resp, sizeof(resp), 500U) != HAL_OK)
     {
         /* Echo gelmedi — AUX yoksa veya bazi modul versiyonlarinda normal.
-         * Config komutu gonderildi, devam et (LORA_OK dondur). */
+         * Bloklayan receive timeout'la bittiyse RxState BUSY kalabilir;
+         * temizle. Config komutu gonderildi, devam et (LORA_OK dondur). */
+        HAL_UART_Abort(huart);
+        __HAL_UART_CLEAR_OREFLAG(huart);
         return LORA_OK;
     }
 
@@ -186,8 +189,15 @@ static void Lora_ReadConfig(UART_HandleTypeDef *huart)
     }
 
     HAL_StatusTypeDef st = HAL_UART_Receive(huart, resp, 6U, 500U);
+
+    /* KRITIK: Bloklayan HAL_UART_Receive HAL_TIMEOUT ile bitince RxState
+     * BUSY_RX'te takili kalabiliyor. Bu durumda sonradan cagrilan
+     * HAL_UART_Receive_IT ya HAL_BUSY doner ya da arm edilse bile callback
+     * tetiklenmez -> rx_byte=0. Her cikista state'i READY'e cek. */
     if (st != HAL_OK) {
-        printf("[CFG] Echo alinamadi (st=%d) — E32 baglantiyi kontrol et.\r\n",
+        HAL_UART_Abort(huart);
+        __HAL_UART_CLEAR_OREFLAG(huart);
+        printf("[CFG] Echo alinamadi (st=%d) — E32 echo'lamayabilir (normal).\r\n",
                (int)st);
         return;
     }
@@ -267,12 +277,34 @@ LoraStatus_t Lora_Init(LoraCtx_t *ctx, UART_HandleTypeDef *huart)
     printf("[CFG] --- Yazma sonrasi E32 ayarlari ---\r\n");
     Lora_ReadConfig(huart);
 
-    /* 5. Hata olsa da normal moda don — modul calismali */
+    /* 5. Normal moda gecmeden once UART'i sifirla.
+     * Yukaridaki tum bloklayan HAL_UART_Receive cagrilari (ReadConfig x2,
+     * WriteConfig echo) timeout'la bitmis olabilir ve donanim/HAL state'inde
+     * artik veri, ORE/NE/FE bayraklari veya BUSY_RX birakmis olabilir.
+     * Bunlar temizlenmezse Lora_StartReceive arm edilse bile IT-RX sagir
+     * kalir -> rx_byte=0. */
+    HAL_UART_Abort(huart);
+    __HAL_UART_CLEAR_OREFLAG(huart);
+    __HAL_UART_CLEAR_NEFLAG(huart);
+    __HAL_UART_CLEAR_FEFLAG(huart);
+
+    /* 6. Hata olsa da normal moda don — modul calismali */
     if (E32_EnterNormalMode() != LORA_OK)
         return LORA_ERR_TIMEOUT;
 
     /* Normal moda geçiş sonrasi AUX stabilizasyonu */
     HAL_Delay(50U);
+
+    /* 7. KRITIK: Modul Config->Normal gecisinde UART TX hattina anlik glitch
+     * veya anlamsiz startup byte'lari firlatabilir. IT-RX henuz kurulmadigi
+     * icin donanim bu veriyi yakalayip ORE bayragini TEKRAR kaldirir. Bu
+     * yuzden stabilizasyon beklemesinden SONRA bir kez daha temizle. RX'in
+     * ilk arm'i (main: Lora_StartReceive) bu temizlikten sonra olacak,
+     * StartReceive de kendi icinde kosulsuz temizledigi icin cift guvence. */
+    HAL_UART_Abort(huart);
+    __HAL_UART_CLEAR_OREFLAG(huart);
+    __HAL_UART_CLEAR_NEFLAG(huart);
+    __HAL_UART_CLEAR_FEFLAG(huart);
 
     return cfg_st;
 }
@@ -291,8 +323,30 @@ LoraStatus_t Lora_StartReceive(LoraCtx_t *ctx)
 {
     if (!ctx || !ctx->huart) return LORA_ERR;
 
+    /* Guvence 1: arm oncesi RxState READY degilse abort et. Onceki bloklayan
+     * islemlerden veya yarim kalan IT-RX'ten kalan BUSY_RX, Receive_IT'i
+     * HAL_BUSY'ye dusurur ve RX sessizce arm edilemez. */
+    if (ctx->huart->RxState != HAL_UART_STATE_READY)
+    {
+        HAL_UART_AbortReceive(ctx->huart);
+    }
+
+    /* Guvence 2 (KRITIK): Hata bayraklarini KOSULSUZ temizle.
+     * TX sirasinda (IT-RX kapaliyken) hatta veri dustuyse donanimda ORE
+     * asili kalir AMA RxState READY'dir (AbortReceive_IT onu zaten READY
+     * yapmistir). Bu durumda yukaridaki if'e GIRILMEZ; eger temizlik if
+     * icinde olsaydi ORE asili kalir, Receive_IT baslar ama donanim ORE
+     * yuzunden yeni byte kesmesi uretmez -> RX sonsuza kadar sagir kalir.
+     * Bu yuzden temizlik her cagri da kosulsuz yapilmali. */
+    __HAL_UART_CLEAR_OREFLAG(ctx->huart);
+    __HAL_UART_CLEAR_NEFLAG(ctx->huart);
+    __HAL_UART_CLEAR_FEFLAG(ctx->huart);
+
     if (HAL_UART_Receive_IT(ctx->huart, &ctx->rx_byte_buf, 1) != HAL_OK)
+    {
+        ctx->rx_active = 0U;
         return LORA_ERR;
+    }
 
     ctx->rx_active = 1U;          /* FIX-4 */
     return LORA_OK;
@@ -373,14 +427,11 @@ void Lora_OnUartError(LoraCtx_t *ctx, UART_HandleTypeDef *huart)
 {
     if (!ctx || ctx->huart != huart) return;
 
-    /* Overrun / Noise / Frame hatalarini temizle */
-    __HAL_UART_CLEAR_OREFLAG(huart);
-    __HAL_UART_CLEAR_NEFLAG(huart);
-    __HAL_UART_CLEAR_FEFLAG(huart);
-
-    /* Interrupt'i yeniden arm et */
-    if (HAL_UART_Receive_IT(ctx->huart, &ctx->rx_byte_buf, 1) == HAL_OK)
-        ctx->rx_active = 1U;
-    else
+    /* RX'i guvenli yeniden baslat. Lora_StartReceive ZATEN kosulsuz
+     * ORE/NE/FE temizligi + RxState guard yapiyor; cipak Receive_IT
+     * cagirmak yerine onu kullaniyoruz. Boylece HAL'in bazi versiyonlarinda
+     * ORE aninda RxState BUSY_RX'te asili kalinca olusan kalici sagirlasma
+     * (Receive_IT -> HAL_BUSY -> rx_active=0 -> sonsuza kadar sessiz) engellenir. */
+    if (Lora_StartReceive(ctx) != LORA_OK)
         ctx->rx_active = 0U;
 }

@@ -82,7 +82,8 @@ typedef enum {
 
 typedef enum {
     LINE_IDLE = 0,
-    LINE_COLLECT
+    LINE_COLLECT,
+    LINE_OVERFLOW   /* tampon tasti: \n gorene kadar gelen her byte cop */
 } LineState_t;
 
 /**
