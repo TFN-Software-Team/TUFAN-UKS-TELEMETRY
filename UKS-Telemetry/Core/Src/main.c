@@ -22,8 +22,9 @@
   *           ve AUX-busy durumunda E-STOP dusebiliyordu. Yeni yol IT-RX'i
   *           guvenli durdurup TX yapar, sonra RX'i yeniden baslatir;
   *           AUX bloklamaz. Gonderim basarisizsa tekrar denenir.
-  *  FIX-B : _write() kaldirildi. syscalls.c ile cift-tanim cakismasi
-  *           riskini ortadan kaldirmak icin yalnizca __io_putchar birakildi.
+  *  FIX-B : printf PicoLibc uzerinden calisir (starm_putc -> __io_putchar).
+  *           _write main.c'de strong tanimli; syscalls.c'deki
+  *           __strong_reference(_write, write) icin gerekli, KALDIRILAMAZ.
   *  FIX-C : Dashboard her frame yerine her DASH_EVERY_N frame'de bir
   *           basiliyor. Tum frame'ler yine parse edilir; sadece blocking
   *           ekran ciktisi seyreltilir, RX'e nefes alani birakilir.
@@ -52,7 +53,7 @@ static uint32_t         last_heartbeat_ms = 0;
  * 0 ile baslatilinca ilk 200 ms'de buton yok sayiliyordu.
  * (uint32_t)(-2000) → wraparound ile now=0'da fark=2000 > 200 → gecilir.
  */
-static uint32_t         last_button_press = (uint32_t)(-2000);
+static volatile uint32_t last_button_press = (uint32_t)(-2000);
 
 static volatile uint8_t estop_tx_pending  = 0;
 
@@ -67,8 +68,17 @@ static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
 
 /* ====================================================================
- * BUG #4 / FIX-B DUZELTME: printf → USART1 yonlendirmesi.
- * Yalnizca __io_putchar; _write KALDIRILDI (syscalls.c cakismasi onlendi).
+ * BUG #4 / FIX-B: printf → USART1 yonlendirmesi.
+ *
+ * Bu proje PicoLibc kullaniyor (syscalls.c icinde __PICOLIBC__ + FDEV
+ * stream). PicoLibc'te printf zinciri:
+ *     printf -> stdout (FDEV_SETUP_STREAM) -> starm_putc -> __io_putchar
+ * Yani karakter cikisi __io_putchar uzerindendir; _write DOGRUDAN bu zincire
+ * girmez. _write yine de gereklidir cunku syscalls.c'deki
+ *     __strong_reference(_write, write);
+ * satiri _write sembolunun TANIMLI olmasini sart kosar. _write yalnizca
+ * burada (main.c, strong) tanimli; syscalls.c onu bilerek tanimlamaz.
+ * Dolayisiyla _write'i buradan KALDIRMA — link hatasi olur (undefined _write).
  * ==================================================================== */
 int __io_putchar(int ch)
 {
@@ -77,9 +87,8 @@ int __io_putchar(int ch)
     return ch;
 }
 
-/* printf → _write → __io_putchar zinciri.
- * syscalls.c'de _write tanimli degil (cakisma onlemek icin kaldirildi),
- * bu yuzden burada tanimliyoruz. Newlib, printf icin bu fonksiyonu cagirir. */
+/* _write — PicoLibc'in __strong_reference(_write, write) baglamasi icin
+ * gerekli. POSIX write() cagrisi gelirse de byte'lari __io_putchar'a yansitir. */
 int _write(int file, char *ptr, int len)
 {
     (void)file;
@@ -125,11 +134,32 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 /* ====================================================================
  * FIX-A DUZELTME: E-STOP TX — Lora_SendCritical ile.
  * IT-RX guvenli durdurulur/yeniden baslatilir, AUX bloklamaz.
- * Gonderim basarisizsa pending tekrar set edilir (yeniden dene).
+ *
+ * FIX-D2 (retry throttle): Gonderim basarisizsa pending tekrar set edilir
+ * AMA en az ESTOP_RETRY_MS gecmeden tekrar DENENMEZ. Aksi halde modul AUX'u
+ * surekli LOW'da takiliysa (elektriksel ariza/RF parazit) ana dongu her
+ * turda Lora_SendCritical'in 50 ms AUX beklemesine girer; while(1) saniyede
+ * 6-7 kez doner, Telemetry_Process ac kalir ve printf hatti spam'lenir.
+ * Throttle ile retry'lar seyreltilir, telemetri akisi korunur. E-STOP'un
+ * ILK denemesi gecikmesizdir; yalnizca BASARISIZ tekrarlar throttle'lanir.
  * ==================================================================== */
+#define ESTOP_RETRY_MS  100U
+
 static void process_estop_tx(void)
 {
+    /* Wraparound init: boot'ta (uint32_t)(-ESTOP_RETRY_MS) ile basla ki
+     * now=0..100 araliginda gelen ILK E-STOP bile throttle'a takilmadan
+     * aninda gonderilsin. (last_button_press ile ayni desen.) */
+    static uint32_t last_retry_ms = (uint32_t)(0U - ESTOP_RETRY_MS);
+
     if (!estop_tx_pending) return;
+
+    /* Onceki deneme basarisiz olduysa, art arda spam'i onlemek icin bekle.
+     * (last_retry_ms yalnizca basarisizlikta guncellenir; ilk denemede
+     *  fark zaten buyuk oldugu icin gecikme yasanmaz.) */
+    uint32_t now = HAL_GetTick();
+    if ((now - last_retry_ms) < ESTOP_RETRY_MS) return;
+
     estop_tx_pending = 0U;
 
     uint8_t buf[TEL_ESTOP_BURST_COUNT];
@@ -144,9 +174,10 @@ static void process_estop_tx(void)
     }
     else
     {
-        estop_tx_pending = 1U;   /* kritik: bir sonraki dongude tekrar dene */
-        printf("\r\n!! E-STOP TX hatasi (ls=%d) — tekrar denenecek !!\r\n\r\n",
-               (int)ls);
+        estop_tx_pending = 1U;   /* kritik: tekrar dene (throttle'li) */
+        last_retry_ms    = now;  /* basarisizlik anini kaydet */
+        printf("\r\n!! E-STOP TX hatasi (ls=%d) — %lu ms sonra tekrar !!\r\n\r\n",
+               (int)ls, (unsigned long)ESTOP_RETRY_MS);
     }
 }
 
@@ -213,6 +244,21 @@ int main(void)
         if ((now - last_heartbeat_ms) >= 3000U)
         {
             last_heartbeat_ms = now;
+
+            /* WATCHDOG: rx_active=0 ise RX bir noktada donanim kilitleniyor
+             * demektir (ORE/BUSY sonrasi StartReceive basarisiz olmus).
+             * Hic kurtarma yoksa UKS arac kapanana kadar sonsuza kadar
+             * sagir kalir. Burada sessizce yeniden arm et. */
+            if (lora_ctx.rx_active == 0U)
+            {
+                printf("[WARN] RX donanim kilidi algilandi (rx_active=0) — "
+                       "yeniden baslatiliyor...\r\n");
+                if (Lora_StartReceive(&lora_ctx) == LORA_OK)
+                    printf("[OK] RX kurtarildi.\r\n");
+                else
+                    printf("[ERR] RX kurtarma basarisiz — donanim/LoRa kontrol et.\r\n");
+            }
+
             const TelStats_t *s = Telemetry_GetStats(&tel_ctx);
             printf("[HB] t=%lu ms | rx_byte=%lu  good=%lu  bad=%lu  gap=%lu\r\n",
                    (unsigned long)now,
@@ -297,16 +343,24 @@ static void MX_GPIO_Init(void)
     __HAL_RCC_GPIOA_CLK_ENABLE();
     __HAL_RCC_GPIOB_CLK_ENABLE();
 
-    /* PB11 (MOTOR_EN) once HIGH: acil durumda fail-safe */
-    HAL_GPIO_WritePin(MOTOR_EN_GPIO_Port, MOTOR_EN_Pin, GPIO_PIN_SET);
-
     /* PA0 — E-STOP butonu: falling edge + pull-up */
     g.Pin  = AC_L_STOP_Pin;
     g.Mode = GPIO_MODE_IT_FALLING;
     g.Pull = GPIO_PULLUP;
     HAL_GPIO_Init(AC_L_STOP_GPIO_Port, &g);
 
-    /* PB11 — MOTOR_EN cikisi */
+    /* PB11 — MOTOR_EN cikisi.
+     * STM32 glitch-free baslatma standardi: ONCE WritePin (ODR latch'le),
+     * SONRA HAL_GPIO_Init (output moda gec).
+     *
+     * Nedeni: Boot'ta pin floating input, ODR=0. Eger once Init yapilirsa
+     * pin aninda 0V surer (~200ns LOW glitch), SONRA WritePin HIGH yapar.
+     * Motor surucunun E-STOP devresi bu kisa LOW'u okursa arac boot'ta
+     * yanlis E-STOP'a girer. Dogru sira: once WritePin ile ODR'ye HIGH
+     * yaz (pin hala floating, fiziksel hatta etki yok), sonra Init ile
+     * output moduna gec — pin o an hazirda bekleyen HIGH degerini surer,
+     * glitch olmaz. CubeMX'in urettigi tum GPIO kodlari bu siraya uyar. */
+    HAL_GPIO_WritePin(MOTOR_EN_GPIO_Port, MOTOR_EN_Pin, GPIO_PIN_SET);
     g.Pin   = MOTOR_EN_Pin;
     g.Mode  = GPIO_MODE_OUTPUT_PP;
     g.Pull  = GPIO_NOPULL;
