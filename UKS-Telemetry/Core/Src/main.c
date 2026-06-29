@@ -152,15 +152,21 @@ static void process_estop_tx(void)
      * aninda gonderilsin. (last_button_press ile ayni desen.) */
     static uint32_t last_retry_ms = (uint32_t)(0U - ESTOP_RETRY_MS);
 
-    if (!estop_tx_pending) return;
+    __disable_irq();
+    uint8_t pending = estop_tx_pending;
+    estop_tx_pending = 0U;
+    __enable_irq();
+    if (!pending) return;
 
     /* Onceki deneme basarisiz olduysa, art arda spam'i onlemek icin bekle.
      * (last_retry_ms yalnizca basarisizlikta guncellenir; ilk denemede
      *  fark zaten buyuk oldugu icin gecikme yasanmaz.) */
     uint32_t now = HAL_GetTick();
-    if ((now - last_retry_ms) < ESTOP_RETRY_MS) return;
-
-    estop_tx_pending = 0U;
+    if ((now - last_retry_ms) < ESTOP_RETRY_MS)
+    {
+        estop_tx_pending = 1U;
+        return;
+    }
 
     uint8_t buf[TEL_ESTOP_BURST_COUNT];
     uint8_t n = Telemetry_EncodeEStopBurst(buf, sizeof(buf));
@@ -265,7 +271,8 @@ int main(void)
                    (unsigned long)s->rx_bytes,
                    (unsigned long)s->good_packets,
                    (unsigned long)(s->parse_fail + s->bad_tag +
-                                   s->bad_version + s->range_fail),
+                                   s->bad_version + s->range_fail +
+                                   s->ring_overflow + s->timeout_drop),
                    (unsigned long)s->seq_gaps);
         }
 

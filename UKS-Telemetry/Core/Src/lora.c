@@ -333,7 +333,7 @@ LoraStatus_t Lora_StartReceive(LoraCtx_t *ctx)
 
     /* Guvence 2 (KRITIK): Hata bayraklarini KOSULSUZ temizle.
      * TX sirasinda (IT-RX kapaliyken) hatta veri dustuyse donanimda ORE
-     * asili kalir AMA RxState READY'dir (AbortReceive_IT onu zaten READY
+     * asili kalir AMA RxState READY'dir (AbortReceive onu zaten READY
      * yapmistir). Bu durumda yukaridaki if'e GIRILMEZ; eger temizlik if
      * icinde olsaydi ORE asili kalir, Receive_IT baslar ama donanim ORE
      * yuzunden yeni byte kesmesi uretmez -> RX sonsuza kadar sagir kalir.
@@ -381,7 +381,7 @@ static LoraStatus_t Lora_TxSafe(LoraCtx_t *ctx, const uint8_t *data,
 
     /* 1. IT-RX'i guvenli durdur */
     if (was_rx) {
-        HAL_UART_AbortReceive_IT(ctx->huart);
+        HAL_UART_AbortReceive(ctx->huart);
         ctx->rx_active = 0U;
     }
 
@@ -417,6 +417,9 @@ void Lora_OnUartRxCplt(LoraCtx_t *ctx, UART_HandleTypeDef *huart)
         ctx->rx_cb(ctx->rx_byte_buf, HAL_GetTick(), ctx->rx_user);
 
     /* Bir sonraki byte icin interrupt'i yeniden arm et */
+    __HAL_UART_CLEAR_OREFLAG(ctx->huart);
+    __HAL_UART_CLEAR_NEFLAG(ctx->huart);
+    __HAL_UART_CLEAR_FEFLAG(ctx->huart);
     if (HAL_UART_Receive_IT(ctx->huart, &ctx->rx_byte_buf, 1) == HAL_OK)
         ctx->rx_active = 1U;
     else

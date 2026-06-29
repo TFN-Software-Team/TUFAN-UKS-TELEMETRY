@@ -26,7 +26,7 @@
  *  Duzeltmeler (v4 — frame kuyrugu):
  *  5) Cift tampon (buffers[2] + frame_ready) yerine SPSC frame kuyrugu
  *     (frame_q[TEL_FRAME_Q_DEPTH]). Eski tasarimda tek main turunda iki
- *     satir decode edilirse ikincisi dusuyordu (overflow_drop). Kuyruk
+ *     satir decode edilirse ikincisi dusuyordu (queue_overflow_drop). Kuyruk
  *     derinligi ile bu kayip pratikte sifirlanir.
  *  6) Commit_Frame artik basari (1/0) dondurur; good_packets yalnizca
  *     kuyruga gercekten yayinlanan frame icin artar (eski kodda dusen
@@ -127,7 +127,7 @@ static inline uint8_t Commit_Frame(TelCtx_t *ctx)
 
     if (next == ctx->fq_tail)
     {
-        ctx->stats.overflow_drop++;   /* kuyruk dolu — ana dongu yetisemedi */
+        ctx->stats.queue_overflow_drop++;  /* kuyruk dolu — ana dongu yetisemedi */
         return 0U;
     }
 
@@ -215,7 +215,7 @@ static void Decode_Line(TelCtx_t *ctx, const uint8_t *buf, uint16_t len)
      * yetisemediginde) izleme durur, kuyruk bosalinca da dusen frame'ler
      * sahte bir seq_gap olarak raporlanirdi — bu, RF hattini saglikliyken
      * arizali gosterir. Mevcut sira dogrudur: gecerli parse edilen her frame
-     * sequence'a sayilir; kuyruk doluluğu ayrica overflow_drop'ta izlenir.
+     * sequence'a sayilir; kuyruk doluluğu ayrica queue_overflow_drop'ta izlenir.
      * Telemetri VERISI bundan etkilenmez; yalnizca istatistik semantigi. */
     Track_Sequence(ctx, (uint32_t)v_seq);
 
@@ -237,7 +237,7 @@ static void Decode_Line(TelCtx_t *ctx, const uint8_t *buf, uint16_t len)
     d->bms_data_valid       = (uint8_t) v_bv;
 
     /* Yalnizca kuyruga gercekten yayinlanabilen frame "good" sayilir.
-     * Dolu kuyrukta dusen frame Commit_Frame icinde overflow_drop'a yazilir. */
+     * Dolu kuyrukta dusen frame Commit_Frame icinde queue_overflow_drop'a yazilir. */
     if (Commit_Frame(ctx))
         ctx->stats.good_packets++;
     return;
@@ -293,7 +293,7 @@ static void Process_Byte(TelCtx_t *ctx, uint8_t b, uint32_t now_ms)
     {
         /* Tampon doldu. LINE_OVERFLOW'a gec; bu satirin geri kalan
          * byte'lari bir sonraki \n'e kadar sessizce cop'e atilacak. */
-        ctx->stats.overflow_drop++;
+        ctx->stats.line_overflow_drop++;
         ctx->line_len   = 0U;
         ctx->line_state = LINE_OVERFLOW;
     }
@@ -560,9 +560,9 @@ void Telemetry_PrintStats(const TelCtx_t *ctx)
     printf("  Tag hata        : %lu\r\n", (unsigned long)s->bad_tag);
     printf("  Version hata    : %lu\r\n", (unsigned long)s->bad_version);
     printf("  Range hata      : %lu\r\n", (unsigned long)s->range_fail);
-    printf("  Timeout/overflow: %lu / %lu\r\n",
-           (unsigned long)s->timeout_drop,
-           (unsigned long)s->overflow_drop);
+    printf("  Timeout drop    : %lu\r\n", (unsigned long)s->timeout_drop);
+    printf("  Satir overflow  : %lu\r\n", (unsigned long)s->line_overflow_drop);
+    printf("  Kuyruk overflow : %lu\r\n", (unsigned long)s->queue_overflow_drop);
     printf("  Ring overflow   : %lu\r\n", (unsigned long)s->ring_overflow);
     printf("  Gecerli pkt     : %lu\r\n", (unsigned long)s->good_packets);
     printf("  Seq gap         : %lu\r\n", (unsigned long)s->seq_gaps);

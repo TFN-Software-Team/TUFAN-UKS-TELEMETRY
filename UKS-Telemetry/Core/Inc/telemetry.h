@@ -119,9 +119,10 @@ typedef struct {
     uint32_t bad_tag;          /* Ilk alan "TEL" degil */
     uint32_t bad_version;
     uint32_t range_fail;
-    uint32_t timeout_drop;     /* Yarim satir timeout */
-    uint32_t overflow_drop;    /* Satir tamponu doldu / frame slot dolu */
-    uint32_t ring_overflow;    /* RX ring buffer doldu (ana dongu yetisemedi) */
+    uint32_t timeout_drop;        /* Yarim satir timeout */
+    uint32_t line_overflow_drop;  /* Satir tamponu doldu (128 B limit asildi) */
+    uint32_t queue_overflow_drop; /* Frame kuyrugu dolu (ana dongu yetisemedi) */
+    uint32_t ring_overflow;       /* RX ring buffer doldu (ISR yetisemedi) */
     uint32_t good_packets;
     uint32_t seq_gaps;         /* Beklenenin uzerinde atlama */
     uint32_t seq_dup_or_stale; /* Ayni veya geri giden sira */
