@@ -14,7 +14,9 @@
  *    bit[2:0] = air data rate (000=0.3k 001=1.2k 010=2.4k 011=4.8k
  *                              100=9.6k 101=19.2k ...)
  *
- *  SPED = 0x1A = 0001 1010
+ *  SPED = 0x1A = 0001 1010   (commit 56e9b72: "E32 SPED fix (0xC2->0x1A)",
+ *                              fiziksel diagnostic read ile dogrulanmis son
+ *                              bilinen-calisan deger — DOKUNULMADAN BIRAKILDI)
  *    bit[7:6] = 00  → 8N1, parity yok
  *    bit[5:3] = 011 → UART 9600 baud   (STM32 USART2 ile AYNI olmali)
  *    bit[2:0] = 010 → 2.4 kbps hava hizi
@@ -28,6 +30,19 @@
  *
  *    NOT — daha eski deger 0x18 = 8N1 + UART 9600 + 0.3k air idi: UART
  *    baud'u dogruydu ama air rate yanlisti.
+ *
+ *    ACIK SORUN — AIR RATE UYUMSUZLUGU (UKS-AKS senkron edilmedi):
+ *    AKS tarafi (ESP_AKS/include/SystemConfig.h) su an LORA_CFG_SPED=0xC4,
+ *    yani bit[2:0]=100 → 9.6 kbps hava hizi. UKS burada 0x1A ile bit[2:0]=010
+ *    → 2.4 kbps hava hizinda kaliyor. AIR RATE her iki tarafta AYNI olmak
+ *    ZORUNDA (bit[5:3] UART baud alaninin aksine bu alan YEREL DEGIL,
+ *    fiziksel RF parametresi) — su anki haliyle iki E32 modulu BIRBIRINI
+ *    DUYAMAZ. Bu, AKS'in kendi SPED degerini de (0xC4 -> bit[5:3]=000=1200
+ *    baud, ESP32'nin LORA_UART_BAUD=9600 ile celisiyor — ayni sinifta bir
+ *    hata) gozden gecirmesini gerektiren, bu repo'nun disinda kalan ayri
+ *    bir koordinasyon isidir. UKS bilerek su an icin SADECE son bilinen-
+ *    calisan yerel degerine (0x1A) geri alindi; air rate uyumu AYRI
+ *    cozulmelidir.
  *
  *  CHAN = 0x17  (23 decimal)
  *    Frekans = 410 + CHAN = 410 + 23 = 433 MHz

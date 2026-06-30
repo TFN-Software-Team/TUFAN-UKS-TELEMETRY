@@ -174,23 +174,33 @@ static void Decode_Line(TelCtx_t *ctx, const uint8_t *buf, uint16_t len)
         return;
     }
 
+    /* Alan sirasi (TEL haric, 0-index'li f[]):
+     *  1=ver 2=seq 3=rpm 4=torque 5=motorErr 6=motorValid 7=motorTimeout
+     *  8=cellVMax 9=cellVMin 10=tempH 11=tempL 12=sysState 13=packV
+     *  14=current 15=soc 16=bmsValid 17=ts_ms 18=spd_x10 */
     long v_ver, v_seq, v_rpm, v_torq, v_merr, v_mv, v_mt;
-    long v_soc, v_bcurr, v_btemp, v_bvolt, v_bcell, v_berr, v_bv;
+    long v_cellmax, v_cellmin, v_temph, v_templ, v_sysst;
+    long v_packv, v_curr, v_soc, v_bv, v_tsms, v_spd;
 
-    if (!Parse_Int(f[1].p,  f[1].len,   0,  255,        &v_ver))   goto pfail;
-    if (!Parse_Int(f[2].p,  f[2].len,   0,  2147483647L,&v_seq))   goto pfail;
-    if (!Parse_Int(f[3].p,  f[3].len,   0,  65535,      &v_rpm))   goto pfail;
-    if (!Parse_Int(f[4].p,  f[4].len,  -32768, 32767,   &v_torq))  goto pfail;
-    if (!Parse_Int(f[5].p,  f[5].len,   0,  255,        &v_merr))  goto pfail;
-    if (!Parse_Int(f[6].p,  f[6].len,   0,  1,          &v_mv))    goto pfail;
-    if (!Parse_Int(f[7].p,  f[7].len,   0,  1,          &v_mt))    goto pfail;
-    if (!Parse_Int(f[8].p,  f[8].len,   0,  255,        &v_soc))   goto pfail;
-    if (!Parse_Int(f[9].p,  f[9].len,  -32768, 32767,   &v_bcurr)) goto pfail;
-    if (!Parse_Int(f[10].p, f[10].len, -32768, 32767,   &v_btemp)) goto pfail;
-    if (!Parse_Int(f[11].p, f[11].len,  0,  65535,      &v_bvolt)) goto pfail;
-    if (!Parse_Int(f[12].p, f[12].len,  0,  65535,      &v_bcell)) goto pfail;
-    if (!Parse_Int(f[13].p, f[13].len,  0,  255,        &v_berr))  goto pfail;
-    if (!Parse_Int(f[14].p, f[14].len,  0,  1,          &v_bv))    goto pfail;
+    if (!Parse_Int(f[1].p,  f[1].len,   0,  255,        &v_ver))     goto pfail;
+    if (!Parse_Int(f[2].p,  f[2].len,   0,  2147483647L,&v_seq))     goto pfail;
+    if (!Parse_Int(f[3].p,  f[3].len,   0,  65535,      &v_rpm))     goto pfail;
+    if (!Parse_Int(f[4].p,  f[4].len,  -32768, 32767,   &v_torq))    goto pfail;
+    if (!Parse_Int(f[5].p,  f[5].len,   0,  255,        &v_merr))    goto pfail;
+    if (!Parse_Int(f[6].p,  f[6].len,   0,  1,          &v_mv))      goto pfail;
+    if (!Parse_Int(f[7].p,  f[7].len,   0,  1,          &v_mt))      goto pfail;
+    if (!Parse_Int(f[8].p,  f[8].len,   0,  65535,      &v_cellmax)) goto pfail;
+    if (!Parse_Int(f[9].p,  f[9].len,   0,  65535,      &v_cellmin)) goto pfail;
+    if (!Parse_Int(f[10].p, f[10].len, -128, 127,       &v_temph))   goto pfail;
+    if (!Parse_Int(f[11].p, f[11].len, -128, 127,       &v_templ))   goto pfail;
+    if (!Parse_Int(f[12].p, f[12].len,  1,  4,          &v_sysst))   goto pfail;
+    if (!Parse_Int(f[13].p, f[13].len,  0,  65535,      &v_packv))   goto pfail;
+    if (!Parse_Int(f[14].p, f[14].len, -2147483647L, 2147483647L,
+                                                         &v_curr))   goto pfail;
+    if (!Parse_Int(f[15].p, f[15].len,  0,  10000,      &v_soc))     goto pfail;
+    if (!Parse_Int(f[16].p, f[16].len,  0,  1,          &v_bv))      goto pfail;
+    if (!Parse_Int(f[17].p, f[17].len,  0,  2147483647L,&v_tsms))    goto pfail;
+    if (!Parse_Int(f[18].p, f[18].len,  0,  3000,       &v_spd))     goto pfail;
 
     if ((uint8_t)v_ver != TEL_PROTOCOL_VERSION)
     {
@@ -198,11 +208,8 @@ static void Decode_Line(TelCtx_t *ctx, const uint8_t *buf, uint16_t len)
         return;
     }
 
-    /* Sanity range kontrolu */
-    if ((uint16_t)v_rpm  > TEL_RPM_MAX      ||
-        (uint8_t) v_soc  > TEL_BMS_SOC_MAX  ||
-        v_btemp          > TEL_BMS_TEMP_MAX ||
-        v_btemp          < TEL_BMS_TEMP_MIN)
+    /* Sanity range kontrolu (tip/Parse_Int sinirinin OTESINDE ek kontrol) */
+    if ((uint16_t)v_rpm > TEL_RPM_MAX)
     {
         ctx->stats.range_fail++;
         return;
@@ -222,19 +229,23 @@ static void Decode_Line(TelCtx_t *ctx, const uint8_t *buf, uint16_t len)
     /* Kuyrukta bir sonraki bos slot'a (fq_head) yaz */
     TelData_t *d = &ctx->frame_q[ctx->fq_head];
     d->protocol_version     = (uint8_t) v_ver;
-    d->sequence             = (uint32_t)v_seq;
-    d->motor_rpm            = (uint16_t)v_rpm;
-    d->motor_torque         = (int16_t) v_torq;
-    d->motor_error_flags    = (uint8_t) v_merr;
-    d->motor_data_valid     = (uint8_t) v_mv;
-    d->motor_timeout_active = (uint8_t) v_mt;
-    d->bms_soc              = (uint8_t) v_soc;
-    d->bms_current_dA       = (int16_t) v_bcurr;
-    d->bms_temp_C           = (int16_t) v_btemp;
-    d->bms_pack_voltage_dV  = (uint16_t)v_bvolt;
-    d->bms_avg_cell_mV      = (uint16_t)v_bcell;
-    d->bms_error_flags      = (uint8_t) v_berr;
-    d->bms_data_valid       = (uint8_t) v_bv;
+    d->sequence              = (uint32_t)v_seq;
+    d->motor_rpm             = (uint16_t)v_rpm;
+    d->motor_torque          = (int16_t) v_torq;
+    d->motor_error_flags     = (uint8_t) v_merr;
+    d->motor_data_valid      = (uint8_t) v_mv;
+    d->motor_timeout_active  = (uint8_t) v_mt;
+    d->bms_cell_vmax_decimv  = (uint16_t)v_cellmax;
+    d->bms_cell_vmin_decimv  = (uint16_t)v_cellmin;
+    d->bms_temp_highest_c    = (int16_t) v_temph;
+    d->bms_temp_lowest_c     = (int16_t) v_templ;
+    d->bms_system_state      = (uint8_t) v_sysst;
+    d->bms_pack_voltage_deciv = (uint16_t)v_packv;
+    d->bms_current_centima   = (int32_t) v_curr;
+    d->bms_soc_hundredths    = (uint16_t)v_soc;
+    d->bms_data_valid        = (uint8_t) v_bv;
+    d->timestamp_ms          = (uint32_t)v_tsms;
+    d->speed_kmh_x10         = (uint16_t)v_spd;
 
     /* Yalnizca kuyruga gercekten yayinlanabilen frame "good" sayilir.
      * Dolu kuyrukta dusen frame Commit_Frame icinde queue_overflow_drop'a yazilir. */
@@ -491,6 +502,18 @@ static const char *Status_Str(TelStatus_t s)
     }
 }
 
+static const char *SysState_Str(uint8_t st)
+{
+    switch (st)
+    {
+        case 1: return "DISCHARGE";
+        case 2: return "IDLE";
+        case 3: return "CHARGE";
+        case 4: return "FAULT";
+        default: return "UNK";
+    }
+}
+
 void Telemetry_PrintDashboard(const TelData_t *d, TelStatus_t status,
                               uint8_t estop_active)
 {
@@ -516,6 +539,10 @@ void Telemetry_PrintDashboard(const TelData_t *d, TelStatus_t status,
     printf("  |  Durum: %-7s  Seq: %-8lu Ver: %u       |\r\n",
            Status_Str(status), (unsigned long)d->sequence,
            (unsigned)d->protocol_version);
+    printf("  |  t=%lu ms   hiz: %u.%u km/h                  |\r\n",
+           (unsigned long)d->timestamp_ms,
+           (unsigned)(d->speed_kmh_x10 / 10U),
+           (unsigned)(d->speed_kmh_x10 % 10U));
     printf("  |--- Motor ----------------------------------|\r\n");
     printf("  |   RPM    : %5u    Torque : %6d         |\r\n",
            estop_active ? 0U : (unsigned)d->motor_rpm,
@@ -524,28 +551,36 @@ void Telemetry_PrintDashboard(const TelData_t *d, TelStatus_t status,
            (unsigned)d->motor_error_flags,
            (unsigned)d->motor_data_valid,
            (unsigned)d->motor_timeout_active);
-    printf("  |--- BMS ------------------------------------|\r\n");
-    printf("  |   SoC    : %3u%%  ", (unsigned)d->bms_soc);
-    Print_SocBar(d->bms_soc);
+    printf("  |--- BMS (%-9s, V:%u) ----------------|\r\n",
+           SysState_Str(d->bms_system_state),
+           (unsigned)d->bms_data_valid);
+
+    unsigned soc_pct  = (unsigned)(d->bms_soc_hundredths / 100U);
+    unsigned soc_frac = (unsigned)(d->bms_soc_hundredths % 100U);
+    printf("  |   SoC    : %3u.%02u%%  ", soc_pct, soc_frac);
+    Print_SocBar((uint8_t)soc_pct);
     printf(" |\r\n");
 
-    int      ca = d->bms_current_dA / 10;
-    int      cd = d->bms_current_dA % 10; if (cd < 0) cd = -cd;
-    unsigned va = (unsigned)(d->bms_pack_voltage_dV / 10U);
-    unsigned vd = (unsigned)(d->bms_pack_voltage_dV % 10U);
-    printf("  |   Curr   : %4d.%d A   Pack : %3u.%u V      |\r\n",
+    long     ca = d->bms_current_centima / 100;
+    long     cd = d->bms_current_centima % 100; if (cd < 0) cd = -cd;
+    unsigned va = (unsigned)(d->bms_pack_voltage_deciv / 10U);
+    unsigned vd = (unsigned)(d->bms_pack_voltage_deciv % 10U);
+    printf("  |   Curr   : %6ld.%02ld mA  Pack : %3u.%u V      |\r\n",
            ca, cd, va, vd);
 
-    printf("  |   Temp   : %4d C", (int)d->bms_temp_C);
-    if      (d->bms_temp_C > 60) printf("    !! YUKSEK !!");
-    else if (d->bms_temp_C > 45) printf("    !  UYARI  !");
-    else                         printf("                ");
-    printf("    |\r\n");
+    printf("  |   TempH  : %4d C   TempL : %4d C",
+           (int)d->bms_temp_highest_c, (int)d->bms_temp_lowest_c);
+    if      (d->bms_temp_highest_c > 60) printf("  !! YUKSEK !!");
+    else if (d->bms_temp_highest_c > 45) printf("  !  UYARI  !");
+    else                                 printf("             ");
+    printf(" |\r\n");
 
-    printf("  |   Cell   : %4u mV    Errs : 0x%02X  V:%u  |\r\n",
-           (unsigned)d->bms_avg_cell_mV,
-           (unsigned)d->bms_error_flags,
-           (unsigned)d->bms_data_valid);
+    unsigned cmax_i = (unsigned)(d->bms_cell_vmax_decimv / 10U);
+    unsigned cmax_f = (unsigned)(d->bms_cell_vmax_decimv % 10U);
+    unsigned cmin_i = (unsigned)(d->bms_cell_vmin_decimv / 10U);
+    unsigned cmin_f = (unsigned)(d->bms_cell_vmin_decimv % 10U);
+    printf("  |   CellMax: %4u.%u mV  CellMin: %4u.%u mV  |\r\n",
+           cmax_i, cmax_f, cmin_i, cmin_f);
     printf("  +============================================+\r\n\r\n");
 }
 

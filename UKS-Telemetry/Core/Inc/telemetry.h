@@ -2,10 +2,33 @@
  * @file    telemetry.h
  * @brief   AKS uyumlu ASCII CSV telemetri parser + tek-byte komut gondericisi.
  *
- *  AKS -> UKS Telemetri (her satir bir frame, CRLF sonlu):
- *      "TEL,<ver>,<seq>,<rpm>,<torq>,<merr>,<mvalid>,<mtout>,
- *       <soc>,<bcurr>,<btemp>,<bvolt>,<bcell>,<berr>,<bvalid>\r\n"
- *      Toplam 15 alan, ilk alan literal "TEL".
+ *  AKS -> UKS Telemetri v2 (her satir bir frame, CRLF sonlu):
+ *      "TEL,<ver>,<seq>,<rpm>,<torque>,<motorErr>,<motorValid>,<motorTimeout>,
+ *       <cellVMax>,<cellVMin>,<tempH>,<tempL>,<sysState>,
+ *       <packV>,<current>,<soc>,<bmsValid>,<ts_ms>,<spd_x10>\r\n"
+ *      Toplam 19 alan, ilk alan literal "TEL" (ESP_AKS lib/Telemetry ile
+ *      birebir — Telemetry.cpp::sendStatus format string sirasi).
+ *
+ *      Olcekler (AKS Telemetry.h / TelemetryData ile birebir):
+ *        rpm            uint16, ham RPM
+ *        torque         int16,  ham
+ *        motorErr       uint8,  bit bayrak
+ *        motorValid/Timeout  0/1
+ *        cellVMax/Min   uint16, x0.1 mV
+ *        tempH/tempL    int8 kaynak (burada int16 saklanir), derece C
+ *        sysState       uint8, 1=Discharge 2=IDLE 3=Charge 4=FAULT
+ *        packV          uint16, x0.1 V
+ *        current        int32,  x0.01 mA (+sarj / -desarj)
+ *        soc            uint16, x0.01 %  (0..10000 = %0.00..%100.00)
+ *        bmsValid       0/1
+ *        ts_ms          uint32, AKS boot'tan beri ms
+ *        spd_x10        uint16, arac hizi x10 km/h
+ *
+ *      NOT: Bu format, ESP_AKS deposunda iki ayri calismanin (BMS alan
+ *      bolunmesi + ts_ms/spd_x10 eklenmesi) BIRLESTIRILMESINI gerektirir;
+ *      yazi yazildigi anda hicbir tek ESP_AKS dalinda 19 alanin TUMU bir
+ *      arada uretilmiyor. UKS bu sozlesmeye gore hazir; AKS tarafinin da
+ *      ayni birlesimi yapmasi gerekir.
  *
  *  UKS -> AKS Komut (tek byte, framing/checksum YOK):
  *      0xA1 = EMERGENCY_STOP
@@ -38,10 +61,12 @@
 /* Telemetri (ASCII CSV) */
 #define TEL_TAG_STR             "TEL"
 #define TEL_TAG_LEN             3U
-#define TEL_FIELD_COUNT         15U
-#define TEL_LINE_MAX_LEN        128U     /* CRLF dahil maksimum satir */
+#define TEL_FIELD_COUNT         19U
+#define TEL_LINE_MAX_LEN        128U     /* CRLF dahil maksimum satir
+                                           * (19 alanli en kotu durum ~107
+                                           * byte; 128 marjli sigar) */
 #define TEL_PARTIAL_TIMEOUT_MS  500U     /* Yarim satirin atilma suresi */
-#define TEL_PROTOCOL_VERSION    1U
+#define TEL_PROTOCOL_VERSION    2U
 
 /* RX ring buffer boyutu. 2'nin kuvveti olmali (maske ile sarma).
  * 256 byte: 9600 baud'da ~266 ms'lik veriyi tamponlar — ana dongu
@@ -67,9 +92,6 @@
 #define TEL_ESTOP_BURST_COUNT   3U
 
 /* Sanity araliklari (parser'da hard reject) */
-#define TEL_BMS_SOC_MAX         100
-#define TEL_BMS_TEMP_MAX        120
-#define TEL_BMS_TEMP_MIN        (-40)
 #define TEL_RPM_MAX             20000
 
 /* ========== Tipler ========== */
@@ -102,14 +124,20 @@ typedef struct {
     uint8_t   motor_data_valid;
     uint8_t   motor_timeout_active;
 
-    /* BMS */
-    uint8_t   bms_soc;             /* yuzde 0..100 */
-    int16_t   bms_current_dA;      /* deci-amper (1 = 0.1 A), isaretli */
-    int16_t   bms_temp_C;          /* derece C, isaretli */
-    uint16_t  bms_pack_voltage_dV; /* deci-volt (1 = 0.1 V) */
-    uint16_t  bms_avg_cell_mV;     /* mV */
-    uint8_t   bms_error_flags;
+    /* BMS (Solion SK BMS uyumlu — ESP_AKS Telemetry.h v2 alan bolunmesi) */
+    uint16_t  bms_cell_vmax_decimv;   /* x0.1 mV */
+    uint16_t  bms_cell_vmin_decimv;   /* x0.1 mV */
+    int16_t   bms_temp_highest_c;     /* derece C (kaynak int8, burada int16) */
+    int16_t   bms_temp_lowest_c;      /* derece C */
+    uint8_t   bms_system_state;       /* 1=Discharge 2=IDLE 3=Charge 4=FAULT */
+    uint16_t  bms_pack_voltage_deciv; /* x0.1 V */
+    int32_t   bms_current_centima;    /* x0.01 mA (+sarj / -desarj) */
+    uint16_t  bms_soc_hundredths;     /* x0.01 % (0..10000 = %0.00..%100.00) */
     uint8_t   bms_data_valid;
+
+    /* Zaman / hiz (v2 ile eklendi) */
+    uint32_t  timestamp_ms;           /* AKS boot'tan beri ms */
+    uint16_t  speed_kmh_x10;          /* arac hizi x10 km/h */
 } TelData_t;
 
 typedef struct {

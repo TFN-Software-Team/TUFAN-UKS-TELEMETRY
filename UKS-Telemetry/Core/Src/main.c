@@ -202,7 +202,8 @@ int main(void)
     setvbuf(stdout, NULL, _IONBF, 0);
 
     printf("\r\n>>> UKS YER ISTASYONU BASLATILIYOR <<<\r\n");
-    printf("    Protokol  : ASCII CSV, 15 alan, AKS uyumlu\r\n");
+    printf("    Protokol  : ASCII CSV v%u, %u alan, AKS uyumlu\r\n",
+           (unsigned)TEL_PROTOCOL_VERSION, (unsigned)TEL_FIELD_COUNT);
     printf("    Saat      : HSI 8 MHz (PLL yok)\r\n");
     printf("    Monitor   : USART1 115200 baud\r\n");
     printf("    LoRa UART : USART2 9600 baud\r\n");
@@ -291,7 +292,22 @@ int main(void)
             TelData_t   d;
             TelStatus_t st = Telemetry_Parse(&tel_ctx, &d);
 
-            /* FIX-C: ekran ciktisini seyrelt — RX'e nefes alani */
+            if (st == TEL_VALID)
+            {
+                /* PC izleme merkezi icin makine-okunur CSV forward satiri.
+                 * Dashboard throttle'indan (DASH_EVERY_N) BAGIMSIZ — her
+                 * gecerli pakette basilir. T_bat_C=tempH, V_bat=packV/10,
+                 * hiz=spd_x10/10; kalan enerji PC tarafinda soc'ten turetilir. */
+                printf("CSV,%lu,%u,%d,%u,%u,%lu\r\n",
+                       (unsigned long)d.timestamp_ms,
+                       (unsigned)d.speed_kmh_x10,
+                       (int)d.bms_temp_highest_c,
+                       (unsigned)d.bms_pack_voltage_deciv,
+                       (unsigned)d.bms_soc_hundredths,
+                       (unsigned long)d.sequence);
+            }
+
+            /* FIX-C: dashboard ciktisini seyrelt — RX'e nefes alani */
             if ((++dash_frame_counter % DASH_EVERY_N) == 0U)
             {
                 Telemetry_PrintDashboard(&d, st,
