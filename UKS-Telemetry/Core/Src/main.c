@@ -48,6 +48,15 @@ static LoraCtx_t   lora_ctx;
 
 static uint32_t         last_heartbeat_ms = 0;
 
+/* Heartbeat TX (0xB0) — UYUM_NOTU.md bolum 2: madde 9.2.a'nin izin verdigi
+ * stabilizasyon-teyidi geri bildirimi, komut kanalindan (0xA1-0xA4) bagimsiz. */
+static uint32_t         last_heartbeat_tx_ms = 0;
+
+/* Link-down tespiti: son gecerli TEL frame'inin alindigi tick.
+ * 0 = henuz hic gecerli frame alinmadi (boot durumu, timeout tetiklemez). */
+static uint32_t         last_valid_tel_tick = 0;
+static uint8_t          link_down = 0;
+
 /*
  * BUG #8 DUZELTME: Boot'ta E-STOP kilitlenmesi.
  * 0 ile baslatilinca ilk 200 ms'de buton yok sayiliyordu.
@@ -207,7 +216,8 @@ int main(void)
     printf("    Saat      : HSI 8 MHz (PLL yok)\r\n");
     printf("    Monitor   : USART1 115200 baud\r\n");
     printf("    LoRa UART : USART2 9600 baud\r\n");
-    printf("    E32 ayar  : SPED=0x%02X CHAN=0x%02X OPTION=0x%02X\r\n",
+    printf("    E32 ayar  : SPED=0x%02X (9600 UART | 2.4kbps air)  "
+           "CHAN=0x%02X  OPTION=0x%02X\r\n",
            E32_CFG_SPED, E32_CFG_CHAN, E32_CFG_OPTION);
     printf("    (hedef: SPED=0x1A | CHAN=0x17 | OPTION=0x47)\r\n");
 
@@ -246,6 +256,31 @@ int main(void)
 
         /* E-STOP gonderimi (ISR'dan set edilen flag) */
         process_estop_tx();
+
+        /* Heartbeat TX (0xB0): AKS'e periyodik "canliyim" sinyali.
+         * Best-effort — E-STOP gibi kritik degil, basarisizsa sessizce
+         * atlanir ve bir sonraki periyotta tekrar denenir. Lora_Send
+         * (Lora_SendCritical degil) kullanilir: E-STOP'un AUX-busy
+         * onceligini heartbeat calmaz. */
+        if ((now - last_heartbeat_tx_ms) >= LORA_HEARTBEAT_PERIOD_MS)
+        {
+            last_heartbeat_tx_ms = now;
+
+            uint8_t hb = LORA_HEARTBEAT_BYTE;
+            (void)Lora_Send(&lora_ctx, &hb, 1U);
+        }
+
+        /* Link-down tespiti: TEL_LINK_TIMEOUT_MS suredir gecerli TEL
+         * frame'i gelmediyse baglanti kopmus sayilir. LINK,UP gecisi
+         * asagida, gecerli bir TEL_VALID frame parse edildiginde yapilir
+         * (st o noktada bilinir). */
+        if (!link_down &&
+            last_valid_tel_tick != 0U &&
+            (now - last_valid_tel_tick) > TEL_LINK_TIMEOUT_MS)
+        {
+            link_down = 1U;
+            printf("LINK,DOWN,%lu\r\n", (unsigned long)now);
+        }
 
         /* Heartbeat: her 3 saniyede istatistik bas */
         if ((now - last_heartbeat_ms) >= 3000U)
@@ -294,6 +329,14 @@ int main(void)
 
             if (st == TEL_VALID)
             {
+                last_valid_tel_tick = now;
+
+                if (link_down)
+                {
+                    link_down = 0U;
+                    printf("LINK,UP,%lu\r\n", (unsigned long)now);
+                }
+
                 /* PC izleme merkezi icin makine-okunur CSV forward satiri.
                  * Dashboard throttle'indan (DASH_EVERY_N) BAGIMSIZ — her
                  * gecerli pakette basilir. T_bat_C=tempH, V_bat=packV/10,
@@ -311,7 +354,8 @@ int main(void)
             if ((++dash_frame_counter % DASH_EVERY_N) == 0U)
             {
                 Telemetry_PrintDashboard(&d, st,
-                                         Telemetry_IsEStopActive(&tel_ctx));
+                                         Telemetry_IsEStopActive(&tel_ctx),
+                                         link_down);
             }
         }
     }

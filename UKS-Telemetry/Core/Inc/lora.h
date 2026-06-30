@@ -88,6 +88,16 @@
 #define E32_AUX_CFG_TIMEOUT_MS    2000U
 
 /* =========================================================================
+ * Heartbeat (UKS -> AKS)
+ *
+ *  0xB0, komut kanalindan (0xA1-0xA4, telemetry.h) ayri, icerik tasimayan
+ *  bir "canliyim" sinyalidir. Zamanlayici tetiklemelidir; operator girdisi
+ *  GEREKTIRMEZ. Bkz. UYUM_NOTU.md bolum 2.
+ * ========================================================================= */
+#define LORA_HEARTBEAT_BYTE       0xB0U
+#define LORA_HEARTBEAT_PERIOD_MS  1000U
+
+/* =========================================================================
  * Tip tanimlari
  * ========================================================================= */
 typedef enum {

@@ -94,6 +94,10 @@
 /* Sanity araliklari (parser'da hard reject) */
 #define TEL_RPM_MAX             20000
 
+/* Link-down esigi: bu suredir gecerli TEL frame'i gelmediyse baglanti
+ * kopmus sayilir (bkz. main.c link_down state, UYUM_NOTU.md bolum 2). */
+#define TEL_LINK_TIMEOUT_MS     2000U
+
 /* ========== Tipler ========== */
 
 typedef enum {
@@ -243,7 +247,8 @@ void              Telemetry_ResetStats(TelCtx_t *ctx);
 
 void              Telemetry_PrintDashboard(const TelData_t *data,
                                            TelStatus_t status,
-                                           uint8_t estop_active);
+                                           uint8_t estop_active,
+                                           uint8_t link_down);
 void              Telemetry_PrintStats    (const TelCtx_t *ctx);
 
 #endif /* TELEMETRY_H */
