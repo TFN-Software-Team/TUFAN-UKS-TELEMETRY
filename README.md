@@ -1,4 +1,10 @@
+<<<<<<< Updated upstream
 # UKS — Uzaktan Kontrol Sistemi (Yer İstasyonu Firmware'i)
+=======
+> ⚠️ Yönetmelik 9.2 uyumu ve UKS/AKS kanal ayrımı için bkz. [UYUM_NOTU.md](./UYUM_NOTU.md).
+
+# 🚗⚡ Elektromobil Güvenlik Kontrol Sistemi
+>>>>>>> Stashed changes
 
 **Repo:** `TFN-Software-Team/TUFAN-UKS-TELEMETRY` · **Branch:** `ravza`
 **MCU:** STM32F103 (Cortex-M3) · **HAL:** STM32 HAL (RTOS yok, bare-metal ana döngü)
