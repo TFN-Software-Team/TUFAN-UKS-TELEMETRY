@@ -20,7 +20,7 @@ TEL,ver,seq,rpm,torque,motorErr,motorValid,motorTimeout,cellVMax,cellVMin,
 |---|------|-----|-------|-----------------|----------|
 | 0 | `TEL` | — | — | literal | Sabit etiket |
 | 1 | `ver` | uint8 | — | 0..255 (== `TEL_PROTOCOL_VERSION`=2 zorunlu) | Protokol versiyonu |
-| 2 | `seq` | uint32 | — | 0..2147483647 | Sıra numarası (gap/dup tespiti) |
+| 2 | `seq` | uint32 | — | 0..4294967295 | Sıra numarası (gap/dup tespiti) |
 | 3 | `rpm` | uint16 | ham | 0..65535 (sanity ≤ 20000) | Motor RPM |
 | 4 | `torque` | int16 | ham | -32768..32767 | Motor tork geri beslemesi |
 | 5 | `motorErr` | uint8 | bit bayrak | 0..255 | Motor hata bayrakları |
@@ -35,12 +35,13 @@ TEL,ver,seq,rpm,torque,motorErr,motorValid,motorTimeout,cellVMax,cellVMin,
 | 14 | `current` | int32 | ×0.01 mA | -2147483647..2147483647 | Pack akımı (+şarj / -deşarj) |
 | 15 | `soc` | uint16 | ×0.01 % | 0..10000 (10000=%100.00) | Şarj durumu |
 | 16 | `bmsValid` | uint8 | bool | 0..1 | BMS verisi geçerli mi |
-| 17 | `ts_ms` | uint32 | ms | 0..2147483647¹ | AKS boot'tan beri geçen süre |
+| 17 | `ts_ms` | uint32 | ms | 0..4294967295 | AKS boot'tan beri geçen süre |
 | 18 | `spd_x10` | uint16 | ×0.1 km/h | 0..3000 | Araç hızı |
 
-¹ Parser dahili olarak işaretli `long` (32 bit) kullanır; `ts_ms` üst sınırı
-bu yüzden `UINT32_MAX` değil `2147483647`'dir (mevcut araç çalışma
-sürelerinde — sürekli ~24.8 gün açık kalmadıkça — sorun teşkil etmez).
+`seq` ve `ts_ms`, tip sınırlarının tamamını (`0..UINT32_MAX`) kabul eden
+isaretsiz bir parser (`Parse_U32`) ile ayrıştırılır — AKS bu iki alanı
+uint32 olarak üretir ve sarabilir (`ts_ms` ~49.7 günde sarar); parser bu
+sözleşmeyle birebir eşleşir.
 
 Alan sayısı 19'dan farklıysa veya `ver != 2` ise paket reddedilir
 (`parse_fail` / `bad_version` istatistiği artar); alan sayısı/versiyon

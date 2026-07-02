@@ -64,3 +64,6 @@ Thumbs.db
 # Other
 *.log
 *.out
+
+# Stray/duplicate nested project copy (accidental nested clone/extract)
+UKS-Telemetry/UKS-Telemetry/

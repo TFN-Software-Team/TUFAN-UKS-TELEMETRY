@@ -98,7 +98,17 @@ danışmana/jüriye teyit ettirilmelidir.
 > olup olmadığı bu dokümanın kapsamı dışındadır ve **doğrulanmadan** teknik
 > kontrole girilmemelidir.
 
-## 5. Teknik Kontrol Checklist (Madde 9.2.i)
+## 5. Sayım Konvansiyonu — `TEL_FIELD_COUNT`
+
+`TEL_FIELD_COUNT=19`, `"TEL"` etiketini alan #0 olarak DAHİL sayar.
+Sayısal alan sayısı 18'dir (`ver`..`spd_x10`). "AKS 18 alan gönderiyor,
+UKS 19 bekliyor" ifadesi bir uyumsuzluk DEĞİLDİR — iki farklı sayım
+konvansiyonudur (biri etiketi sayar, diğeri saymaz). Alan sayısı
+değişikliği önerilmeden önce token sayımı `TEL` dahil yapılmalıdır.
+
+Bu not, aynı yanlış alarmın üçüncü kez yaşanmasını önlemek içindir.
+
+## 6. Teknik Kontrol Checklist (Madde 9.2.i)
 
 Teknik kontrol sırasında aşağıdakiler doğrulanmalıdır:
 

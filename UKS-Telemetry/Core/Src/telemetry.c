@@ -108,6 +108,40 @@ static int Parse_Int(const char *s, uint16_t len,
 }
 
 /**
+ * Isaretsiz ondalik tam sayi parser'i. '+'/'-' kabul etmez (yalnizca rakam).
+ * Donus: 1=basarili, 0=hata. UINT32_MAX'a (4294967295) kadar tasma-guvenli.
+ *
+ * Neden ayri fonksiyon: Parse_Int'in birikimi `long` (isaretli 32-bit) —
+ * ts_ms/seq gibi AKS'te uint32 olarak tanimli alanlar 2147483647'i
+ * astiginda Parse_Int'e sigmiyor ve paket sessizce reddediliyordu (bkz.
+ * UYUM_NOTU.md). Parse_U32 birikimi `uint32_t` tutarak tam UINT32_MAX
+ * araligini kabul eder.
+ */
+static int Parse_U32(const char *s, uint16_t len,
+                     uint32_t min_v, uint32_t max_v, uint32_t *out)
+{
+    if (len == 0) return 0;
+
+    uint32_t v = 0;
+    for (uint16_t i = 0; i < len; i++)
+    {
+        if (s[i] < '0' || s[i] > '9') return 0;
+        /* Parse_Int'teki son-hane tasma korumasinin isaretsiz kariligi:
+         * v==429496729 iken digit>5 gelirse v*10+digit = 4294967296+ olur
+         * ki bu UINT32_MAX'i asar (tasma degil, UB de degil — isaretsiz
+         * aritmetik mod 2^32 sarar — ama yanlis/kucuk bir deger sessizce
+         * KABUL edilmis olurdu). Son hane onceden kontrol edilerek bu
+         * yanlis-kabul onlenir. */
+        if (v > 429496729U ||
+            (v == 429496729U && (uint32_t)(s[i] - '0') > 5U)) return 0;
+        v = v * 10U + (uint32_t)(s[i] - '0');
+    }
+    if (v < min_v || v > max_v) return 0;
+    *out = v;
+    return 1;
+}
+
+/**
  * Commit_Frame — decode edilmis frame'i SPSC kuyruga yayinlar.
  *
  * Decode_Line frame'i zaten &ctx->frame_q[fq_head]'e yazdi; burada sadece
@@ -135,7 +169,20 @@ static inline uint8_t Commit_Frame(TelCtx_t *ctx)
     return 1U;
 }
 
-/** Sequence numarasinda gap / duplicate / stale tespiti. */
+/**
+ * Sequence numarasinda gap / duplicate / stale tespiti.
+ *
+ * Tasma/sarma notu: `seq - ctx->last_sequence` iki uint32_t arasinda
+ * ISARETSIZ aritmetiktir (mod 2^32 sarar, UB YOK); sonucun (int32_t)'a
+ * cast'i "ileri mi geri mi" yonunu okumak icin kullanilir — bu, klasik
+ * TCP sequence-wraparound karsilastirma deseni ve tanimsiz davranis
+ * icermez (GCC/Clang'da implementation-defined, deterministik iki'nin
+ * tumleyeni donusumudur). `ctx->last_sequence + 1U` de ayni sekilde
+ * isaretsiz sarar. Sonuc: seq UINT32_MAX (4294967295) -> 0 sardiginda
+ * (uint32 ts/seq alaninin dogal sarma noktasi) bu, YANLIS bir dev "gap"
+ * olarak DEGIL, dogru sekilde "bir sonraki ardisik seq" olarak
+ * algilanir — cunku hem fark hem +1 ayni modulo aritmetigi kullanir.
+ */
 static inline void Track_Sequence(TelCtx_t *ctx, uint32_t seq)
 {
     if (ctx->have_last_seq)
@@ -178,12 +225,16 @@ static void Decode_Line(TelCtx_t *ctx, const uint8_t *buf, uint16_t len)
      *  1=ver 2=seq 3=rpm 4=torque 5=motorErr 6=motorValid 7=motorTimeout
      *  8=cellVMax 9=cellVMin 10=tempH 11=tempL 12=sysState 13=packV
      *  14=current 15=soc 16=bmsValid 17=ts_ms 18=spd_x10 */
-    long v_ver, v_seq, v_rpm, v_torq, v_merr, v_mv, v_mt;
+    long v_ver, v_rpm, v_torq, v_merr, v_mv, v_mt;
     long v_cellmax, v_cellmin, v_temph, v_templ, v_sysst;
-    long v_packv, v_curr, v_soc, v_bv, v_tsms, v_spd;
+    long v_packv, v_curr, v_soc, v_bv, v_spd;
+    /* seq/ts_ms AKS'te uint32'dir ve sarabilir; `long` (isaretli 32-bit)
+     * 2147483647'nin ustunu tutamayacagindan bunlar ayrica uint32_t
+     * ve Parse_U32 ile tutulur (bkz. Parse_U32 yorumu, UYUM_NOTU.md). */
+    uint32_t v_seq, v_tsms;
 
     if (!Parse_Int(f[1].p,  f[1].len,   0,  255,        &v_ver))     goto pfail;
-    if (!Parse_Int(f[2].p,  f[2].len,   0,  2147483647L,&v_seq))     goto pfail;
+    if (!Parse_U32(f[2].p,  f[2].len,   0U, UINT32_MAX, &v_seq))     goto pfail;
     if (!Parse_Int(f[3].p,  f[3].len,   0,  65535,      &v_rpm))     goto pfail;
     if (!Parse_Int(f[4].p,  f[4].len,  -32768, 32767,   &v_torq))    goto pfail;
     if (!Parse_Int(f[5].p,  f[5].len,   0,  255,        &v_merr))    goto pfail;
@@ -195,11 +246,13 @@ static void Decode_Line(TelCtx_t *ctx, const uint8_t *buf, uint16_t len)
     if (!Parse_Int(f[11].p, f[11].len, -128, 127,       &v_templ))   goto pfail;
     if (!Parse_Int(f[12].p, f[12].len,  1,  4,          &v_sysst))   goto pfail;
     if (!Parse_Int(f[13].p, f[13].len,  0,  65535,      &v_packv))   goto pfail;
+    /* INT32_MIN bilinçli olarak dışlanır; AKS bu değeri üretmez (sanitize
+     * eder). Bkz. ESP_AKS TelemetrySanitize. */
     if (!Parse_Int(f[14].p, f[14].len, -2147483647L, 2147483647L,
                                                          &v_curr))   goto pfail;
     if (!Parse_Int(f[15].p, f[15].len,  0,  10000,      &v_soc))     goto pfail;
     if (!Parse_Int(f[16].p, f[16].len,  0,  1,          &v_bv))      goto pfail;
-    if (!Parse_Int(f[17].p, f[17].len,  0,  2147483647L,&v_tsms))    goto pfail;
+    if (!Parse_U32(f[17].p, f[17].len,  0U, UINT32_MAX, &v_tsms))    goto pfail;
     if (!Parse_Int(f[18].p, f[18].len,  0,  3000,       &v_spd))     goto pfail;
 
     if ((uint8_t)v_ver != TEL_PROTOCOL_VERSION)
@@ -224,12 +277,12 @@ static void Decode_Line(TelCtx_t *ctx, const uint8_t *buf, uint16_t len)
      * arizali gosterir. Mevcut sira dogrudur: gecerli parse edilen her frame
      * sequence'a sayilir; kuyruk doluluğu ayrica queue_overflow_drop'ta izlenir.
      * Telemetri VERISI bundan etkilenmez; yalnizca istatistik semantigi. */
-    Track_Sequence(ctx, (uint32_t)v_seq);
+    Track_Sequence(ctx, v_seq);
 
     /* Kuyrukta bir sonraki bos slot'a (fq_head) yaz */
     TelData_t *d = &ctx->frame_q[ctx->fq_head];
     d->protocol_version     = (uint8_t) v_ver;
-    d->sequence              = (uint32_t)v_seq;
+    d->sequence              = v_seq;
     d->motor_rpm             = (uint16_t)v_rpm;
     d->motor_torque          = (int16_t) v_torq;
     d->motor_error_flags     = (uint8_t) v_merr;
@@ -244,7 +297,7 @@ static void Decode_Line(TelCtx_t *ctx, const uint8_t *buf, uint16_t len)
     d->bms_current_centima   = (int32_t) v_curr;
     d->bms_soc_hundredths    = (uint16_t)v_soc;
     d->bms_data_valid        = (uint8_t) v_bv;
-    d->timestamp_ms          = (uint32_t)v_tsms;
+    d->timestamp_ms          = v_tsms;
     d->speed_kmh_x10         = (uint16_t)v_spd;
 
     /* Yalnizca kuyruga gercekten yayinlanabilen frame "good" sayilir.

@@ -167,12 +167,125 @@ static void test_out_of_range_fields_rejected(void)
     }
 }
 
+/* ===================================================================== */
+/* ts_ms/seq uint32 sinir testleri (S1/S2 duzeltmesi)
+ *
+ * Duzeltme ONCESI: f[17] (ts_ms) ve f[2] (seq) Parse_Int (isaretli long,
+ * ust sinir 2147483647) ile parse ediliyordu. AKS ts_ms'i uint32 boot-ms
+ * olarak uretir (0..4294967295); ts_ms 2147483648'i astiginda (~24.8.
+ * gunden itibaren, ~49.7. gune/sarmaya kadar) HER paket parse_fail ile
+ * reddediliyordu. test_ts_ms_above_int32_max_accepted bu senaryoyu
+ * kanitlar: duzeltme oncesi CHECK'ler FAIL verirdi (Telemetry_IsFrameReady
+ * == 0, parse_fail == 1); duzeltme sonrasi (Parse_U32) PASS eder. */
+
+static void test_ts_ms_above_int32_max_accepted(void)
+{
+    printf("test_ts_ms_above_int32_max_accepted...\n");
+    TelCtx_t ctx;
+    Telemetry_Init(&ctx);
+
+    /* ts_ms = 2147483648 = INT32_MAX + 1. Eski Parse_Int (isaretli long,
+     * ust sinir 2147483647) bunu REDDEDERDI -> asagidaki CHECK'ler
+     * duzeltme oncesi FAIL verir. */
+    const char *line =
+        "TEL,2,0,1500,-250,5,1,0,37734,37422,32,31,2,780,-181610,6283,1,2147483648,425";
+    Feed_Line(&ctx, line, 1000U);
+
+    CHECK(Telemetry_IsFrameReady(&ctx) != 0U,
+          "ts_ms=2147483648 (INT32_MAX+1) must be ACCEPTED (uint32 boot-ms)");
+
+    TelData_t d;
+    TelStatus_t st = Telemetry_Parse(&ctx, &d);
+    CHECK(st == TEL_VALID, "parse status should be TEL_VALID");
+    CHECK(d.timestamp_ms == 2147483648U, "timestamp_ms == 2147483648");
+
+    const TelStats_t *s = Telemetry_GetStats(&ctx);
+    CHECK(s->good_packets == 1U, "good_packets == 1");
+    CHECK(s->parse_fail == 0U,   "parse_fail == 0 (eski davranista 1 olurdu)");
+}
+
+static void test_ts_ms_uint32_max_accepted(void)
+{
+    printf("test_ts_ms_uint32_max_accepted...\n");
+    TelCtx_t ctx;
+    Telemetry_Init(&ctx);
+
+    /* ts_ms = 4294967295 = UINT32_MAX, sarma sinirinin tam kendisi. */
+    const char *line =
+        "TEL,2,0,1500,-250,5,1,0,37734,37422,32,31,2,780,-181610,6283,1,4294967295,425";
+    Feed_Line(&ctx, line, 1000U);
+
+    CHECK(Telemetry_IsFrameReady(&ctx) != 0U, "ts_ms=UINT32_MAX must be accepted");
+    TelData_t d;
+    TelStatus_t st = Telemetry_Parse(&ctx, &d);
+    CHECK(st == TEL_VALID, "parse status should be TEL_VALID");
+    CHECK(d.timestamp_ms == 4294967295U, "timestamp_ms == 4294967295");
+}
+
+static void test_ts_ms_overflow_rejected(void)
+{
+    printf("test_ts_ms_overflow_rejected...\n");
+    TelCtx_t ctx;
+    Telemetry_Init(&ctx);
+
+    /* ts_ms = 4294967296 = UINT32_MAX + 1 (10 hane, tasar) -> reddedilmeli. */
+    const char *line =
+        "TEL,2,0,1500,-250,5,1,0,37734,37422,32,31,2,780,-181610,6283,1,4294967296,425";
+    Feed_Line(&ctx, line, 1000U);
+
+    CHECK(Telemetry_IsFrameReady(&ctx) == 0U, "ts_ms=4294967296 (overflow) must be rejected");
+    CHECK(Telemetry_GetStats(&ctx)->parse_fail == 1U, "ts_ms overflow -> parse_fail");
+}
+
+static void test_ts_ms_negative_rejected(void)
+{
+    printf("test_ts_ms_negative_rejected...\n");
+    TelCtx_t ctx;
+    Telemetry_Init(&ctx);
+
+    /* ts_ms alaninda '-' isareti: Parse_U32 yalnizca rakam kabul eder. */
+    const char *line =
+        "TEL,2,0,1500,-250,5,1,0,37734,37422,32,31,2,780,-181610,6283,1,-1,425";
+    Feed_Line(&ctx, line, 1000U);
+
+    CHECK(Telemetry_IsFrameReady(&ctx) == 0U, "ts_ms=-1 must be rejected");
+    CHECK(Telemetry_GetStats(&ctx)->parse_fail == 1U, "ts_ms='-1' -> parse_fail");
+}
+
+static void test_seq_above_int32_max_accepted(void)
+{
+    printf("test_seq_above_int32_max_accepted...\n");
+    TelCtx_t ctx;
+    Telemetry_Init(&ctx);
+
+    /* seq = 4000000000 (> INT32_MAX, AKS'te uint32 sarabilir). Parse
+     * cokmemeli, paket kabul edilmeli. */
+    const char *line =
+        "TEL,2,4000000000,1500,-250,5,1,0,37734,37422,32,31,2,780,-181610,6283,1,123456,425";
+    Feed_Line(&ctx, line, 1000U);
+
+    CHECK(Telemetry_IsFrameReady(&ctx) != 0U, "seq=4000000000 must be accepted");
+    TelData_t d;
+    TelStatus_t st = Telemetry_Parse(&ctx, &d);
+    CHECK(st == TEL_VALID, "parse status should be TEL_VALID");
+    CHECK(d.sequence == 4000000000U, "sequence == 4000000000");
+
+    const TelStats_t *s = Telemetry_GetStats(&ctx);
+    CHECK(s->good_packets == 1U, "good_packets == 1");
+    CHECK(s->parse_fail == 0U,   "parse_fail == 0");
+}
+
 int main(void)
 {
     test_real_aks_vector();
     test_field_count_must_be_19();
     test_bad_version_rejected();
     test_out_of_range_fields_rejected();
+    test_ts_ms_above_int32_max_accepted();
+    test_ts_ms_uint32_max_accepted();
+    test_ts_ms_overflow_rejected();
+    test_ts_ms_negative_rejected();
+    test_seq_above_int32_max_accepted();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
