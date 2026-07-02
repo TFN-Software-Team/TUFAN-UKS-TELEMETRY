@@ -2,90 +2,23 @@
 #define LORA_H
 
 #include "main.h"
+#include "e22_regs.h"
 #include <stdint.h>
 
 /* =========================================================================
- * E32-433T30D Hedef Konfigürasyon
+ * EBYTE E22-400T30D-V2 (SX1268) surucusu
  *
- *  SPED register bit duzeni (EBYTE E32 — DIKKAT, alanlar bu sirada):
- *    bit[7:6] = UART parity   (00/11 = 8N1, 01 = 8O1, 10 = 8E1)
- *    bit[5:3] = UART baud     (000=1200 001=2400 010=4800 011=9600
- *                              100=19200 101=38400 110=57600 111=115200)
- *    bit[2:0] = air data rate (000=0.3k 001=1.2k 010=2.4k 011=4.8k
- *                              100=9.6k 101=19.2k ...)
+ *  Register adresleri/hedef degerleri/komut sabitleri BURADA DEGIL,
+ *  e22_regs.h icinde tanimlidir (TEK dogruluk kaynagi — bkz. o dosyanin
+ *  basindaki DOGRULAMA NOTU). lora.h/lora.c yalnizca bu sabitleri kullanir.
  *
- *  SPED = 0x1A = 0001 1010   (commit 56e9b72: "E32 SPED fix (0xC2->0x1A)",
- *                              fiziksel diagnostic read ile dogrulanmis son
- *                              bilinen-calisan deger — DOKUNULMADAN BIRAKILDI)
- *    bit[7:6] = 00  → 8N1, parity yok
- *    bit[5:3] = 011 → UART 9600 baud   (STM32 USART2 ile AYNI olmali)
- *    bit[2:0] = 010 → 2.4 kbps hava hizi
- *
- *    NOT — eski deger 0xC2 = parity 8N1 + UART 1200 baud + 2.4k air idi.
- *    Bit alanlari yanlis cozuldugu icin UART'in 9600 oldugu saniliyordu;
- *    aslinda 1200 yaziliyordu. STM32 9600'den, E32 normal modda 1200'den
- *    konusunca link kopuyor ve rx_byte = 0 kaliyordu.
- *    (Config/sleep modunda E32 UART'i her zaman sabit 9600 oldugu icin
- *    config komutunun kendisi yine de yaziliyordu — init "[OK]" donuyordu.)
- *
- *    NOT — daha eski deger 0x18 = 8N1 + UART 9600 + 0.3k air idi: UART
- *    baud'u dogruydu ama air rate yanlisti.
- *
- *    ACIK SORUN — AIR RATE UYUMSUZLUGU (UKS-AKS senkron edilmedi):
- *    AKS tarafi (ESP_AKS/include/SystemConfig.h) su an LORA_CFG_SPED=0xC4,
- *    yani bit[2:0]=100 → 9.6 kbps hava hizi. UKS burada 0x1A ile bit[2:0]=010
- *    → 2.4 kbps hava hizinda kaliyor. AIR RATE her iki tarafta AYNI olmak
- *    ZORUNDA (bit[5:3] UART baud alaninin aksine bu alan YEREL DEGIL,
- *    fiziksel RF parametresi) — su anki haliyle iki E32 modulu BIRBIRINI
- *    DUYAMAZ. Bu, AKS'in kendi SPED degerini de (0xC4 -> bit[5:3]=000=1200
- *    baud, ESP32'nin LORA_UART_BAUD=9600 ile celisiyor — ayni sinifta bir
- *    hata) gozden gecirmesini gerektiren, bu repo'nun disinda kalan ayri
- *    bir koordinasyon isidir. UKS bilerek su an icin SADECE son bilinen-
- *    calisan yerel degerine (0x1A) geri alindi; air rate uyumu AYRI
- *    cozulmelidir.
- *
- *  CHAN = 0x17  (23 decimal)
- *    Frekans = 410 + CHAN = 410 + 23 = 433 MHz
- *    (433 ISM bandi: 433.05 – 434.79 MHz)
- *
- *    NOT — eski deger 0x06 → 416 MHz, ISM bandi disindaydi.
- *
- *  OPTION = 0x47
- *    bit7    = 0   → Transparan (saydamsiz) mod — fixed-point kapali
- *    bit6    = 1   → Push-pull IO
- *    bit[5:3]= 000 → 250 ms wakeup suresi
- *    bit2    = 1   → FEC (Forward Error Correction) acik
- *    bit[1:0]= 11  → 30 dBm TX gucu (E32-433T30D maksimum)
- *
- *    NOT — eski deger 0x44 → 20 dBm (bit[1:0]=00), gereksiz guc kaybi.
- *
- *  RF UYUMU: Iki modul birbirini duyabilmek icin AYNI air rate (SPED
- *  bit[2:0]), AYNI CHAN ve AYNI OPTION (transparan/FEC) degerine sahip
- *  olmali. SPED'in UART baud alani (bit[5:3]) ise YERELdir — her modulun
- *  kendi MCU'suyla konustugu hizdir; iki modulde farkli olabilir. Yani
- *  AKS'in UART baud'unu degistirmen gerekmez, yeter ki AKS'in kendi
- *  MCU'su da kendi E32'siyle ayni baud'da olsun.
- *
- *  ADRES: 0x0000 — broadcast, her iki yone de paket gider.
+ *  E32'den (eski donanim) farklar: register-tabanli C0/C1 komut protokolu,
+ *  farkli config-modu pin seviyeleri (M0=0,M1=1 — E32'de M0=1,M1=1 idi),
+ *  farkli yanit formati (E32: gonderilenin echo'su | E22: C1 basligiyla
+ *  yanit, hata icin FF FF FF). TX/RX veri duzlemi (transparan mod)
+ *  degismedi — E22 de E32 gibi konfigure edildikten sonra ham UART
+ *  transparan koprusu olarak calisir.
  * ========================================================================= */
-#define E32_CFG_ADDH    0x00U
-#define E32_CFG_ADDL    0x00U
-#define E32_CFG_SPED    0x1AU   /* 8N1 | 9600 UART | 2.4 kbps air rate    */
-#define E32_CFG_CHAN    0x17U   /* Kanal 23  | 433 MHz (ISM bandi)        */
-#define E32_CFG_OPTION  0x47U   /* Transparan | PP | 250ms | FEC | 30 dBm */
-
-/* =========================================================================
- * AUX bekleme zaman asimi (ms)
- *
- *  BOOT   : E32 guc açilisinda AUX'u ~200-500 ms LOW tutar.
- *           3000 ms genis marj birakildi.
- *  MODE   : M0/M1 degisiminden sonra AUX HIGH'a gelmesi icin sure.
- *  CFG    : Flash yazma (C0 komutu) sonrasi AUX HIGH bekleme suresi.
- *           E32 datasheet: flash yazma ~200 ms; 2000 ms marj.
- * ========================================================================= */
-#define E32_AUX_BOOT_TIMEOUT_MS   3000U
-#define E32_AUX_MODE_TIMEOUT_MS    500U
-#define E32_AUX_CFG_TIMEOUT_MS    2000U
 
 /* =========================================================================
  * Heartbeat (UKS -> AKS)
@@ -123,12 +56,16 @@ typedef struct {
  * ========================================================================= */
 
 /**
- * @brief  E32 GPIO'larini hazirlar, config moduna girip E32_CFG_* degerlerini
- *         flash'a kalici olarak yazar, Normal moda doner.
+ * @brief  E22 GPIO'larini hazirlar, config moduna girip mevcut register
+ *         blogunu (ADDH..CRYPT_L) okur; hedeften (e22_regs.h) farkli ise
+ *         C0 ile flash'a kalici yazar (ayniysa YAZMAZ — flash omru),
+ *         Normal moda doner.
  *
- * @retval LORA_OK          Basarili
+ * @retval LORA_OK          Basarili (yazildi ya da zaten hedefle esiyordu)
  *         LORA_ERR_TIMEOUT AUX zaman asimi (donanim / besleme kontrol et)
- *         LORA_ERR         Config echo dogrulama hatasi (ayarlar yazilmamis olabilir)
+ *         LORA_ERR         Okuma/yazma yaniti gecersiz (FF FF FF ya da
+ *                           baslik uyumsuz) — E22'de bu net bir hata
+ *                           sinyalidir, E32'deki gibi tolere EDILMEZ
  */
 LoraStatus_t Lora_Init        (LoraCtx_t *ctx, UART_HandleTypeDef *huart);
 

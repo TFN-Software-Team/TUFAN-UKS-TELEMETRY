@@ -1,10 +1,6 @@
-<<<<<<< Updated upstream
 # UKS — Uzaktan Kontrol Sistemi (Yer İstasyonu Firmware'i)
-=======
-> ⚠️ Yönetmelik 9.2 uyumu ve UKS/AKS kanal ayrımı için bkz. [UYUM_NOTU.md](./UYUM_NOTU.md).
 
-# 🚗⚡ Elektromobil Güvenlik Kontrol Sistemi
->>>>>>> Stashed changes
+> ⚠️ Yönetmelik 9.2 uyumu ve UKS/AKS kanal ayrımı için bkz. [UYUM_NOTU.md](./UYUM_NOTU.md).
 
 **Repo:** `TFN-Software-Team/TUFAN-UKS-TELEMETRY` · **Branch:** `ravza`
 **MCU:** STM32F103 (Cortex-M3) · **HAL:** STM32 HAL (RTOS yok, bare-metal ana döngü)
@@ -18,7 +14,7 @@ UKS, FreeRTOS **kullanmaz** — tek çekirdekli, kesme-tabanlı bare-metal bir t
 
 1. **ISR katmanı** — yalnızca ham veri toplar, hiçbir parse/format işi yapmaz.
 2. **Ana döngü (main context)** — tüm ağır iş (satır birleştirme, parse, dashboard basımı) burada yapılır.
-3. **Donanım sürücüleri** (`lora.c`, HAL UART/GPIO) — E32 LoRa modülünü ve UART'ları yönetir.
+3. **Donanım sürücüleri** (`lora.c`, HAL UART/GPIO) — E22 LoRa modülünü ve UART'ları yönetir.
 
 Bu ayrımın nedeni: HSI 8 MHz'de (klon-güvenli saat, aşağıya bakın) `Decode_Line` en kötü senaryoda ~1 ms sürebiliyor; bu süre 9600 baud'daki byte penceresiyle (~1.04 ms) çakışıp Overrun (ORE) riski doğuruyordu. Çözüm: ISR sadece ring buffer'a yazar (mikrosaniye seviyesinde, sabit süreli), ağır iş ana döngüye taşındı.
 
@@ -30,11 +26,12 @@ UKS-Telemetry/
 │   ├── Inc/
 │   │   ├── main.h          — pin haritası, sistem durumu
 │   │   ├── telemetry.h     — protokol sabitleri, TelCtx_t, public API
-│   │   └── lora.h          — E32 config sabitleri, LoraCtx_t, public API
+│   │   ├── lora.h          — LoraCtx_t, public API (E22 register sabitleri e22_regs.h'de)
+│   │   └── e22_regs.h      — E22 register adresleri/hedef değerleri (tek doğruluk kaynağı)
 │   └── Src/
 │       ├── main.c          — sistem init, ana döngü, E-STOP ISR, E-STOP TX
 │       ├── telemetry.c     — CSV parser, frame kuyruğu, dashboard, encoder
-│       ├── lora.c          — E32 GPIO/config/TX-RX sürücüsü
+│       ├── lora.c          — E22 GPIO/config/TX-RX sürücüsü
 │       ├── stm32f1xx_it.c  — kesme handler'ları (EXTI0, USART2)
 │       └── stm32f1xx_hal_msp.c — HAL MSP init (NVIC öncelikleri burada set edilir)
 └── UKS-Telemetry.ioc        — CubeMX proje dosyası (RCC, GPIO, USART tanımları)
@@ -47,71 +44,79 @@ UKS-Telemetry/
 | Pin | İşlev | Açıklama |
 |---|---|---|
 | PA0 | `AC_L_STOP` | Acil durdurma butonu — EXTI falling edge, internal pull-up |
-| PA2 / PA3 | USART2 TX/RX | E32 LoRa modülü — **9600 baud** |
+| PA2 / PA3 | USART2 TX/RX | E22 LoRa modülü — **9600 baud** |
 | PA9 / PA10 | USART1 TX/RX | Seri monitör / ekran çıkışı — **115200 baud** |
-| PB6 | `E32_M0` | E32 mod seçim biti — Normal=LOW, Config=HIGH |
-| PB7 | `E32_M1` | E32 mod seçim biti — Normal=LOW, Config=HIGH |
-| PB10 | `LORA_AUX` | E32 hazır/meşgul sinyali — HIGH=hazır, açık-kolektör + pull-up (input) |
+| PB6 | `E22_M0_Pin` | E22 mod seçim biti — Normal=LOW, Config=LOW |
+| PB7 | `E22_M1_Pin` | E22 mod seçim biti — Normal=LOW, Config=HIGH |
+| PB10 | `LORA_AUX` | E22 hazır/meşgul sinyali — HIGH=hazır, açık-kolektör + pull-up (input) |
 | PB11 | `MOTOR_EN` | Durum çıkışı — HIGH=nominal, LOW=E-STOP aktif |
 
 **Saat kaynağı:** HSI 8 MHz, **PLL kapalı** (kasıtlı — bkz. §6, BUG #6). USART1 @ 115200 baud, HSI 8 MHz'de BRR hata payı ~%0.16 (sınır %2'nin çok altında).
 
-**E32 mod tablosu (M0/M1):**
+**E22 mod tablosu (M0/M1)** — ayrıntılı açıklama için bkz. §3:
 
 | M0 | M1 | Mod |
 |---|---|---|
 | LOW | LOW | Normal (transparan) — veri gönder/al |
-| HIGH | HIGH | Config — AT komutları |
+| LOW | HIGH | Config — `C0`/`C1` register komutları |
 | HIGH | LOW | WOR (kullanılmıyor) |
-| LOW | HIGH | Sleep (kullanılmıyor) |
+| HIGH | HIGH | E22'de kullanılmıyor |
 
 ---
 
-## 3. E32 LoRa Modül Konfigürasyonu
+## 3. E22-400T30D-V2 LoRa Modül Konfigürasyonu
 
-Boot sırasında `Lora_Init()` şu sırayı izler: GPIO hazırla → AUX HIGH bekle (boot tamamlansın) → config moduna gir → `E32_CFG_*` değerlerini flash'a kalıcı yaz + echo doğrula → normal moda dön.
+> **Durum: E32 → E22 migrasyonu GERÇEKLEŞTİ** (bkz. §11). Donanım E32-433T30D'den
+> EBYTE **E22-400T30D-V2** (SX1268, 410.125–493.125 MHz, 30 dBm) modülüne
+> geçirildi. Modül pin-uyumlu (M0/M1/RXD/TXD/AUX/VCC/GND — kart değişikliği
+> yok) ama **konfigürasyon protokolü tamamen farklı**: register-tabanlı
+> `C0`/`C1` komutları, farklı config-modu pin seviyeleri, farklı yanıt
+> formatı. Register adresleri/hedef değerleri **tek doğruluk kaynağı**
+> olarak `Core/Inc/e22_regs.h`'de tutulur; bu bölümdeki değerler o
+> dosyadan türetilmiştir, orada değişmeden burada da değişmemelidir.
 
-```c
-#define E32_CFG_ADDH    0x00U
-#define E32_CFG_ADDL    0x00U
-#define E32_CFG_SPED    0xC2U   /* 9600 UART | 8N1 | 2.4 kbps hava hızı */
-#define E32_CFG_CHAN    0x17U   /* Kanal 23  | 433 MHz (ISM bandı)       */
-#define E32_CFG_OPTION  0x47U   /* Transparan | PP | 250ms | FEC | 30 dBm */
-```
+Boot sırasında `Lora_Init()` şu sırayı izler: GPIO hazırla → AUX HIGH bekle (boot tamamlansın) → config moduna gir (**M0=0, M1=1**) → **tüm register bloğunu (ADDH..CRYPT_L, 9 byte) `C1` ile oku** ve hex dump'la (bench teyidi + read-before-write için) → mevcut değerler hedeften (CRYPT hariç) farklıysa `C0` ile flash'a kalıcı yaz ve yanıtı doğrula → normal moda dön.
 
-### Bit alanı doğrulaması
+### Mod tablosu (M0/M1) — E32'den FARKLI
 
-**SPED = 0xC2 = `1100 0010`**
-| Bit | Değer | Anlam |
+| M0 | M1 | Mod |
 |---|---|---|
-| [7:6] | 11 | UART 9600 baud |
-| [5:3] | 000 | 8N1, parity yok |
-| [2:0] | 010 | 2.4 kbps hava hızı |
+| LOW | LOW | Normal (transparan) — veri gönder/al (E32 ile aynı) |
+| **LOW** | **HIGH** | **Config** — `C0`/`C1` register komutları (E32'de bu seviye **Sleep** moduydu, kullanılmıyordu; E22'de config modu **budur**, E32'nin M0=HIGH,M1=HIGH'ı **değil**) |
+| HIGH | LOW | WOR (kullanılmıyor) |
+| HIGH | HIGH | E22'de kullanılmıyor (E32'de config modu buydu) |
 
-> ⚠️ Eski değer `0x18` = UART 1200 baud + Odd Parity + 0.3 kbps idi — bu yüzden config komutu E32'ye hiç ulaşmıyordu (STM 9600'den konuşuyordu, E32 1200'den dinliyordu). **`0xC2` doğru değerdir, `0x1A` (bit[7:6]=00 → 1200 baud) ile karıştırılmamalı** — bu karışıklık AKS_Sim_ESP tarafında da bir kez yanlış bug raporuna yol açtı.
+### Register haritası (V2 varsayımı — bench dump ile teyit edilecek)
 
-**CHAN = 0x17 = 23 ondalık** → Frekans = 410 + 23 = 433 MHz (433 ISM bandı içinde). Eski değer `0x06` → 416 MHz, ISM bandı dışındaydı.
+| Adres | Register | Hedef değer | Anlam |
+|---|---|---|---|
+| 0x00 | `ADDH` | 0x00 | Adres yüksek bayt |
+| 0x01 | `ADDL` | 0x00 | Adres düşük bayt (0x0000 = genel/broadcast) |
+| 0x02 | `NETID` | 0x00 | V2'de eklendi (V1 haritasında yok) |
+| 0x03 | `REG0` | 0x64 | UART 9600 baud \| 8N1, parity yok \| hava hızı 9.6 kbps |
+| 0x04 | `REG1` | 0x00 | Alt-paket 240 B \| RSSI ortam gürültüsü KAPALI \| TX gücü kademe 0 (**en yüksek**, T30D: 30 dBm) |
+| 0x05 | `REG2` | 0x17 | Kanal 23 → 433.125 MHz |
+| 0x06 | `REG3` | 0x00 | **RSSI byte KAPALI** \| transparan mod \| röle kapalı \| LBT kapalı |
+| 0x07 | `CRYPT_H` | 0x00 | Yazılır, **geri okunamaz** |
+| 0x08 | `CRYPT_L` | 0x00 | Yazılır, **geri okunamaz** |
 
-**OPTION = 0x47 = `0100 0111`**
-| Bit | Değer | Anlam |
-|---|---|---|
-| [7] | 0 | Transparan mod |
-| [6] | 1 | Push-pull çıkış |
-| [5:3] | 000 | 250 ms wakeup süresi |
-| [2] | 1 | FEC açık |
-| [1:0] | 11 | 30 dBm TX gücü (E32-433T30D maksimumu) |
+> **DOĞRULAMA NOTU (bağlayıcı):** E22'nin V1 ve V2 firmware'lerinde register haritası farklıdır (V2'de `NETID` eklendi, sonraki adresler kaydı). Yukarıdaki harita **V2 varsayımıdır**, henüz bench'te doğrulanmadı. `Lora_Init()` her boot'ta bloğu okuyup hex dump basar; bu dump datasheet/gerçek modül davranışıyla karşılaştırılıp adres sabitleri gerekirse **tek yerden** (`e22_regs.h`) düzeltilecek.
 
-Eski değer `0x44` → 20 dBm, gereksiz güç kaybı.
+**Frekans formülü:** `frekans (MHz) = 410.125 + REG2`. `REG2=0x17` (23 ondalık) → `410.125 + 23 = 433.125 MHz` (433 ISM bandı 433.05–434.79 içinde).
 
-**Adres: 0x0000 (broadcast)** — her iki yöne de paket gider.
+> ⚠️ E32'nin formülü `410 + CHAN` idi (tam sayı ofset); E22'de sabit ofset **`410.125`**'tir — bu farkı gözden kaçırmak kanalı ~125 kHz kaydırır.
 
-> **Kritik kural:** AKS ve UKS tarafındaki SPED/CHAN/OPTION değerleri **birebir aynı olmalı**. Farklı hava hızı veya kanal seçilirse modüller birbirini hiç duyamaz.
+**Neden RSSI byte'ı kapalı (REG3 bit7=0):** Açılırsa E22 her alınan paketin sonuna 1 byte RSSI ekler; UKS satır-parser'ı (`telemetry.c`, `TEL_FIELD_COUNT=19` sabit alan sayımına dayanır) ve AKS komut/heartbeat RX'i bu ekstra byte'ı veri sanıp parser'ı bozar. Link kalitesi ileride istenirse ayrı, koordineli bir iş (her iki tarafta protokol versiyon bump'ıyla) olarak yapılır.
 
-### Config yazma protokolü
+**CRYPT neden doğrulanmıyor:** `CRYPT_H`/`CRYPT_L` E22'de yazılabilir ama **geri okunamaz** (okuma her zaman anlamsız/farklı veri döner) — bu yüzden hem read-before-write karşılaştırması hem yazma-sonrası doğrulama bu iki adresi kapsam dışı tutar (`E22_REG_VERIFY_LEN=7`, yalnızca `ADDH..REG3`).
 
-6 byte'lık kalıcı yazma komutu: `[0xC0, ADDH, ADDL, SPED, CHAN, OPTION]`. E32 flash'a yazdıktan sonra aynı 6 byte'ı echo olarak geri döner; `Lora_Init` bu echo'yu doğrular ama doğrulama başarısız olsa da (echo gelmezse veya uyuşmazsa) modülün çalışabileceği varsayımıyla `LORA_OK` döndürüp devam eder — bu, gerçek donanımda bazı E32 versiyonlarının echo göndermemesine karşı bilinçli bir tolerans.
+> **Kritik kural (E32'den değişmedi):** AKS ve UKS tarafındaki `REG0`/`REG2`/`REG3` değerleri **birebir aynı olmalı** (fiziksel RF parametreleri). Farklı hava hızı veya kanal seçilirse modüller birbirini hiç duyamaz.
 
-AUX zaman aşımları: Boot=3000ms, Mode=500ms, CFG=2000ms (E32 datasheet flash yazma süresi ~200ms'e geniş marj).
+### Config protokolü — read-before-write
+
+Config moduna girildikten sonra `ADDH..REG3` (7 byte) `C1 <addr> <len>` ile okunur ve hedefle karşılaştırılır; **tamamı eşleşiyorsa flash'a YAZMA yapılmaz** (log: `"Tüm alanlar (ADDH..REG3) hedefle aynı — YAZMA ATLANDI (flash omru)"`) — flash yazma döngü ömrünü korumak için. Farklıysa `C0 <addr=0x00> <len=9> <vals...>` ile tam blok (CRYPT dahil) yazılır; yanıt başlığı **`C1 <addr> <len>`**'dir (E32'deki "gönderilenin aynen echo'su, başlık `C0`" mantığı **geçersiz**), ardından `vals` yanıtı CRYPT hariç doğrulanır. `FF FF FF` yanıtı ya da beklenmeyen başlık **kesin hata** sayılır (`LORA_ERR`) — E32'deki "echo gelmese/uyuşmasa da `LORA_OK` dönüp devam et" toleransı E22'de **korunmadı**, çünkü `FF FF FF` E22'de net bir ret sinyalidir.
+
+AUX zaman aşımları: Boot=3000ms, Mode=500ms, CFG=2000ms (E32'den devralınan marjlar, değişmedi).
 
 ---
 
@@ -262,7 +267,7 @@ HAL_Init() → SystemClock_Config() (HSI 8MHz, PLL kapalı)
   → MX_USART1_UART_Init() (115200 baud — ekran/monitör)
   → MX_USART2_UART_Init() (9600 baud  — LoRa)
   → Telemetry_Init(&tel_ctx)
-  → Lora_Init(&lora_ctx, &huart2)   — E32 GPIO/config/echo doğrulama
+  → Lora_Init(&lora_ctx, &huart2)   — E22 GPIO/config/register okuma-yazma doğrulama
   → Lora_SetRxByteHandler(...)      — on_lora_rx_byte köprüsü kurulur
   → Lora_StartReceive(&lora_ctx)    — IT-RX başlatılır
 
@@ -275,7 +280,7 @@ Ana döngü (sonsuz):
   [frame hazırsa] Telemetry_Parse + throttle'lı dashboard basımı
 ```
 
-> ⚠️ PB6/PB7 (E32_M0/M1) bilerek `MX_GPIO_Init()` içinde **değil**, `Lora_Init()` → `E32_GPIO_Init()` içinde ayarlanır. Bu sıralama kasıtlı: pinler henüz output değilken LoRa UART init'ten önce modülü yanlışlıkla config moduna almamak için.
+> ⚠️ PB6/PB7 (`E22_M0_Pin`/`E22_M1_Pin`) bilerek `MX_GPIO_Init()` içinde **değil**, `Lora_Init()` → `E22_GPIO_Init()` içinde ayarlanır. Bu sıralama kasıtlı: pinler henüz output değilken LoRa UART init'ten önce modülü yanlışlıkla config moduna almamak için.
 
 ---
 
@@ -291,7 +296,7 @@ main.c başlığında numaralandırılmış, halen geçerli düzeltmeler:
 | BUG #7 | USART1 9600 baud'da dashboard basımı 730ms sürüyor, 200ms timeout aşılıyor | 115200 baud'a çıkarıldı (~60ms'e indi) |
 | BUG #8 | Boot'ta ilk 200ms'de E-STOP butonu yok sayılıyordu | `last_button_press = (uint32_t)(-2000)` wraparound hilesi |
 | BUG #9 | `Parse_Int`'te son hane kontrolü eksik, signed long overflow UB riski | Son hane için ayrı taşma kontrolü eklendi |
-| FIX-E32 | M0/M1 pinleri floating kalıyor, modül mod belirsizliği → `rx_byte=0` | `Lora_Init()` içinde GPIO config + flash yazımı |
+| FIX-E22 | M0/M1 pinleri floating kalıyor, modül mod belirsizliği → `rx_byte=0` | `Lora_Init()` içinde GPIO config + register okuma/yazma (read-before-write) |
 | FIX-A (Kritik) | E-STOP TX, devam eden IT-RX ile çakışıp telemetriyi donduruyordu | `Lora_SendCritical` — IT-RX güvenli durdur/yeniden başlat |
 | FIX-B | `_write()` çift tanım riski | syscalls.c'den kaldırıldı, yalnızca `__io_putchar` |
 | FIX-C | Her frame'de dashboard basımı RX'i bloklayıp veri kaybına yol açıyordu | `DASH_EVERY_N=3` ile throttle |
@@ -317,7 +322,7 @@ UKS-Telemetry'de **native unit test altyapısı yoktur** (AKS_Sim_ESP ve product
 
 - **M0/M1 donanım bağlantısı doğrulandı:** Ravza, M0/M1'in STM32'ye (PB6/PB7) bağlı olduğunu fiziksel olarak teyit etti; `main.h` ve kod tabanı bununla tutarlı.
 - **AKS tarafı asimetrisi:** UKS boot'ta E32'sini kendi kendine konfigüre eder (`Lora_Init`), ancak production AKS firmware'inde E32 için herhangi bir config yazımı **yoktur** — gerçek AKS modülünün o anki konfigürasyonu bilinmiyor ve UKS ile eşleşmemiş olabilir. Bu bilinen bir mimari boşluktur.
-- **E32 → E22 migrasyon olasılığı (henüz planlama aşamasında):** E22 serisi register-tabanlı farklı bir config protokolü kullanıyor (`C1` echo, ters TX güç encoding'i); tam model tanımı (E22 vs E220, T22D vs T30D) netleşmeden bu README'deki §3 geçerliliğini korur, migrasyon olursa ayrı bir bölüm gerekecek.
+- **E32 → E22 migrasyonu GERÇEKLEŞTİ:** Donanım E32-433T30D'den E22-400T30D-V2'ye (SX1268, 30 dBm) geçirildi; register-tabanlı `C0`/`C1` config protokolü, farklı config-modu pin seviyeleri (M0=0,M1=1) ve register haritası `Core/Inc/e22_regs.h`'de tek doğruluk kaynağı olarak tanımlı (bkz. §3). Karşı uçtaki AKS (ESP32) da eşzamanlı E22'ye geçiyor; register hedef değerleri iki tarafta birebir aynı olmalı. Register haritası henüz **V2 varsayımı** — bench dump ile teyit bekliyor (bkz. §3 doğrulama notu).
 - **VCU state alanı planlı, henüz yok:** AKS telemetri paketine VCU durumu eklenmesi planlanıyor — bu, protokol versiyon bump'ı ve UKS parser'ında koordineli güncelleme gerektirecek (15 alan kuralını bozmadan).
 
 ---

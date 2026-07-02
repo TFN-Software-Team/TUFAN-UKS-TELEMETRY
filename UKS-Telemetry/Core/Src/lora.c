@@ -1,35 +1,45 @@
 /**
  * @file    lora.c
- * @brief   E32-433T30D LoRa modulu surucusu (STM32 HAL).
+ * @brief   EBYTE E22-400T30D-V2 (SX1268) LoRa modulu surucusu (STM32 HAL).
  *
- *  Duzeltmeler:
- *  FIX-1: E32_WriteConfig — echo dogrulama offset'i yanlisti.
- *         Komut: [0]=C0 [1]=ADDH [2]=ADDL [3]=SPED [4]=CHAN [5]=OPTION
- *         Echo:  ayni dizi. Onceki kod resp[3]=SPED yerine resp[3]=ADDH
- *         karsilastiriyordu → her zaman LORA_ERR donuyordu.
- *  FIX-2: HAL_UART_Receive timeout 200→500 ms.
- *         AUX HIGH geldikten sonra echo UART tamponundan bos altirilmasi
- *         icin 200 ms yetersizdi; 500 ms ile guvenli marj.
- *  FIX-3: Config modu girisinde huart parametresi artik kullaniliyor
- *         (RX tampon temizleme icin).
+ *  E32 -> E22 MIGRASYONU:
+ *  Donanim pin-uyumlu (M0/M1/RXD/TXD/AUX/VCC/GND) ama konfigurasyon
+ *  protokolu TAMAMEN farkli:
+ *    - Config-modu pin seviyeleri: E32 M0=1,M1=1 idi; E22'de M0=0,M1=1.
+ *    - E32'de sabit 6-byte'lik C0 blogu (ADDH,ADDL,SPED,CHAN,OPTION)
+ *      yazilirdi ve modul GONDERILEN BYTE'LARI AYNEN echo'lardi. E22'de
+ *      komutlar register-adres/uzunluk tabanlidir (C0/C1 addr len ...)
+ *      ve yanit basligi HER ZAMAN C1'dir (echo degil).
+ *    - Hata sinyali: E22 gecersiz/reddedilen komutta 3 byte FF FF FF
+ *      doner — bu net bir hata sinyalidir (E32'deki "echo gelmedi ama
+ *      yine de LORA_OK don, RF test edilsin" toleransi E22'de KORUNMADI,
+ *      bkz. E22_ReadRegs/E22_WriteRegsSaved).
+ *  Register adresleri/hedef degerleri e22_regs.h icinde (TEK dogruluk
+ *  kaynagi); burada hardcode edilmez.
  *
- *  FIX-4 (KRITIK): Half-duplex TX/RX cakismasi.
- *         USART2 uzerinde HAL_UART_Receive_IT ile byte-byte RX surerken
- *         dogrudan HAL_UART_Transmit cagrilirsa HAL __HAL_LOCK yuzunden
- *         TX HAL_BUSY donebilir ya da devam eden RX bozulur. Sonuc:
- *         komut/E-STOP gonderince telemetri akisi donuyor / byte kayboluyor.
- *         Cozum: Lora_Send/Lora_SendCritical icinde TX oncesi IT-RX abort,
+ *  TX/RX veri duzlemi (transparan mod, IT-RX mimarisi, rx_active
+ *  watchdog) E32 ile birebir AYNI kaldi — bu katman (Lora_Send,
+ *  Lora_SendCritical, Lora_StartReceive, Lora_OnUartRxCplt/Error)
+ *  DEGISMEDI, yalnizca isim/yorumlar E22'ye guncellendi.
+ *
+ *  Korunan E32-donemi duzeltmeleri (davranis olarak hala gecerli):
+ *  FIX-4 (KRITIK): Half-duplex TX/RX cakismasi. USART2 uzerinde
+ *         HAL_UART_Receive_IT ile byte-byte RX surerken dogrudan
+ *         HAL_UART_Transmit cagrilirsa HAL __HAL_LOCK yuzunden TX
+ *         HAL_BUSY donebilir ya da devam eden RX bozulur. Cozum:
+ *         Lora_Send/Lora_SendCritical icinde TX oncesi IT-RX abort,
  *         TX, ardindan IT-RX yeniden arm. rx_active bayragi ile takip.
  *  FIX-5: E-STOP best-effort gonderim (Lora_SendCritical) — AUX bloklamaz.
  */
 
 #include "lora.h"
 #include <stdio.h>
+#include <string.h>
 
 /* =========================================================================
  * Yardimci: AUX HIGH bekle
  * ========================================================================= */
-static LoraStatus_t E32_WaitAuxHigh(uint32_t timeout_ms)
+static LoraStatus_t E22_WaitAuxHigh(uint32_t timeout_ms)
 {
     uint32_t start = HAL_GetTick();
     while (HAL_GPIO_ReadPin(LORA_AUX_GPIO_Port, LORA_AUX_Pin) == GPIO_PIN_RESET)
@@ -42,190 +52,203 @@ static LoraStatus_t E32_WaitAuxHigh(uint32_t timeout_ms)
 
 /* =========================================================================
  * GPIO init:
- *   PB6 (M0)  → push-pull cikis, LOW  (boot'ta normal mod)
- *   PB7 (M1)  → push-pull cikis, LOW  (boot'ta normal mod)
- *   PB10 (AUX)→ input, pull-up        (E32 tarafindan surulur)
+ *   PB6 (M0)  -> push-pull cikis, LOW  (boot'ta normal mod)
+ *   PB7 (M1)  -> push-pull cikis, LOW  (boot'ta normal mod)
+ *   PB10 (AUX)-> input, pull-up        (E22 tarafindan surulur)
  * ========================================================================= */
-static void E32_GPIO_Init(void)
+static void E22_GPIO_Init(void)
 {
     GPIO_InitTypeDef g = {0};
 
     /* Once LOW yaz, sonra configure et — pin glitch onleme */
-    HAL_GPIO_WritePin(GPIOB, E32_M0_Pin | E32_M1_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOB, E22_M0_Pin | E22_M1_Pin, GPIO_PIN_RESET);
 
-    g.Pin   = E32_M0_Pin | E32_M1_Pin;
+    g.Pin   = E22_M0_Pin | E22_M1_Pin;
     g.Mode  = GPIO_MODE_OUTPUT_PP;
     g.Pull  = GPIO_NOPULL;
     g.Speed = GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(GPIOB, &g);
 
     /* Configure sonrasi tekrar LOW garantile */
-    HAL_GPIO_WritePin(GPIOB, E32_M0_Pin | E32_M1_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOB, E22_M0_Pin | E22_M1_Pin, GPIO_PIN_RESET);
 
-    /* AUX: E32 acik-kolektör surucudur; pull-up zorunlu */
+    /* AUX: acik-kolektor surucudur; pull-up zorunlu */
     g.Pin  = LORA_AUX_Pin;
     g.Mode = GPIO_MODE_INPUT;
     g.Pull = GPIO_PULLUP;
     HAL_GPIO_Init(LORA_AUX_GPIO_Port, &g);
 }
 
-/* =========================================================================
- * Normal mod: M0=LOW, M1=LOW
- * ========================================================================= */
-static LoraStatus_t E32_EnterNormalMode(void)
+static inline void E22_SetMode(uint8_t m0, uint8_t m1)
 {
-    HAL_GPIO_WritePin(GPIOB, E32_M0_Pin | E32_M1_Pin, GPIO_PIN_RESET);
-    HAL_Delay(2);
-    return E32_WaitAuxHigh(E32_AUX_MODE_TIMEOUT_MS);
+    HAL_GPIO_WritePin(GPIOB, E22_M0_Pin,
+                       m0 ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOB, E22_M1_Pin,
+                       m1 ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
 
 /* =========================================================================
- * Config modu: M0=HIGH, M1=HIGH
+ * Normal mod: M0=0, M1=0 (E32 ile AYNI)
  * ========================================================================= */
-static LoraStatus_t E32_EnterConfigMode(UART_HandleTypeDef *huart)
+static LoraStatus_t E22_EnterNormalMode(void)
+{
+    E22_SetMode(E22_MODE_NORMAL_M0, E22_MODE_NORMAL_M1);
+    HAL_Delay(2);
+    return E22_WaitAuxHigh(E22_AUX_MODE_TIMEOUT_MS);
+}
+
+/* =========================================================================
+ * Config modu: M0=0, M1=1 — E32'DEN FARKLI (E32'de M0=1,M1=1 idi; bu
+ * seviye E32'de WOR modu anlamina gelirdi, E22'de config modudur).
+ * ========================================================================= */
+static LoraStatus_t E22_EnterConfigMode(UART_HandleTypeDef *huart)
 {
     /* RX tamponunu temizle — config komutuna yanit olarak gelen
      * artik baytlari engelle */
     __HAL_UART_CLEAR_OREFLAG(huart);
 
-    HAL_GPIO_WritePin(GPIOB, E32_M0_Pin | E32_M1_Pin, GPIO_PIN_SET);
+    E22_SetMode(E22_MODE_CONFIG_M0, E22_MODE_CONFIG_M1);
     HAL_Delay(2);
-    return E32_WaitAuxHigh(E32_AUX_MODE_TIMEOUT_MS);
+    return E22_WaitAuxHigh(E22_AUX_MODE_TIMEOUT_MS);
 }
 
 /* =========================================================================
- * Konfigurasyon yaz ve echo dogrula
+ * E22_ReadRegs — "C1 addr len" gonderir, "C1 addr len data..." yanitini
+ * dogrular.
  *
- *  Komut (6 byte, kalici yazma):
- *    [0] = 0xC0   — kalici yazma komutu
- *    [1] = 0x00   — baslangic adresi (ADDH)
- *    [2] = 0x00   — (ADDL)
- *    [3] = SPED   — baud + parity + air rate
- *    [4] = CHAN   — kanal / frekans
- *    [5] = OPTION — mod + guc
+ *  Baslik (ilk 3 byte) her zaman ONCE okunur: normal yanitta bu C1/addr/len
+ *  aynasidir, hata yanitinda ise MODUL SADECE 3 byte FF FF FF doner — ayni
+ *  3-byte'lik blocking okuma ile ikisi de yakalanir, boylece "kac byte
+ *  gelecegi onceden bilinmiyor" sorunu cozulur. Baslik gecerliyse (ve hata
+ *  degilse) kalan `len` veri byte'i ikinci bir okumayla alinir.
  *
- *  Echo (6 byte): E32 komutu flash'a yazdiktan sonra ayni 6 byte'i geri
- *  doner. AUX LOW→HIGH gecisi yazmanin tamamlandigini gosterir.
- *
- *  FIX-1: Eski kodda cmd[8] ile 8 byte gonderiliyordu (3 byte header +
- *  5 byte data). E32-433T30D icin dogrudan 6 byte format kullanilmali:
- *  C0 + ADDH + ADDL + SPED + CHAN + OPTION. Fazladan byte gondermek
- *  modulu karmastirir.
- *
- *  FIX-2: Echo dogrulama offset'i duzeltildi:
- *    Eski: resp[3]=SPED, resp[4]=CHAN, resp[5]=OPTION  ← YANLIS
- *    Yeni: resp[0]=0xC0, resp[3]=SPED, resp[4]=CHAN, resp[5]=OPTION
- *    (6 byte gonderilince resp[0..5] komutun tam aynasidir)
+ * @retval LORA_OK          basari, buf'a len byte yazildi
+ *         LORA_ERR_TIMEOUT UART yaniti gelmedi
+ *         LORA_ERR         FF FF FF (modul reddetti) ya da beklenmeyen baslik
  * ========================================================================= */
-static LoraStatus_t E32_WriteConfig(UART_HandleTypeDef *huart)
+static LoraStatus_t E22_ReadRegs(UART_HandleTypeDef *huart, uint8_t addr,
+                                 uint8_t len, uint8_t *buf)
 {
-    /* 6 byte kalici yazma komutu */
-    const uint8_t cmd[6] = {
-        0xC0,           /* kalici yazma */
-        E32_CFG_ADDH,
-        E32_CFG_ADDL,
-        E32_CFG_SPED,
-        E32_CFG_CHAN,
-        E32_CFG_OPTION
-    };
+    const uint8_t cmd[3] = { E22_CMD_READ, addr, len };
 
-    /* Komutu gonder */
+    __HAL_UART_CLEAR_OREFLAG(huart);
     if (HAL_UART_Transmit(huart, (uint8_t *)cmd, sizeof(cmd), 200U) != HAL_OK)
         return LORA_ERR;
 
-    /* Flash yazma tamamlansin (AUX LOW→HIGH) */
-    if (E32_WaitAuxHigh(E32_AUX_CFG_TIMEOUT_MS) != LORA_OK)
-        return LORA_ERR_TIMEOUT;
-
-    /* Echo oku — timeout 500 ms */
-    uint8_t resp[6] = {0};
-    if (HAL_UART_Receive(huart, resp, sizeof(resp), 500U) != HAL_OK)
+    uint8_t hdr[3] = {0};
+    if (HAL_UART_Receive(huart, hdr, sizeof(hdr), 500U) != HAL_OK)
     {
-        /* Echo gelmedi — AUX yoksa veya bazi modul versiyonlarinda normal.
-         * Bloklayan receive timeout'la bittiyse RxState BUSY kalabilir;
-         * temizle. Config komutu gonderildi, devam et (LORA_OK dondur). */
         HAL_UART_Abort(huart);
         __HAL_UART_CLEAR_OREFLAG(huart);
-        return LORA_OK;
+        return LORA_ERR_TIMEOUT;
     }
 
-    /* Echo dogrula — eslesirse kesin OK */
-    if (resp[0] != 0xC0           ||
-        resp[1] != E32_CFG_ADDH   ||
-        resp[2] != E32_CFG_ADDL   ||
-        resp[3] != E32_CFG_SPED   ||
-        resp[4] != E32_CFG_CHAN   ||
-        resp[5] != E32_CFG_OPTION)
+    if (memcmp(hdr, E22_RSP_BAD, sizeof(hdr)) == 0)
+        return LORA_ERR;   /* FF FF FF: modul komutu reddetti */
+
+    if (hdr[0] != E22_CMD_READ || hdr[1] != addr || hdr[2] != len)
+        return LORA_ERR;   /* beklenmeyen baslik */
+
+    if (len == 0U) return LORA_OK;
+
+    if (HAL_UART_Receive(huart, buf, len, 500U) != HAL_OK)
     {
-        /* Echo geldi ama eslesmiyor — yine de devam et, RF test edilsin */
-        return LORA_OK;
+        HAL_UART_Abort(huart);
+        __HAL_UART_CLEAR_OREFLAG(huart);
+        return LORA_ERR_TIMEOUT;
     }
-
     return LORA_OK;
 }
 
 /* =========================================================================
- * Lora_ReadConfig — E32 flash'indaki mevcut ayarlari oku ve yazdir.
+ * E22_WriteRegsSaved — "C0 addr len vals..." gonderir (kalici/flash
+ * yazma), "C1 addr len vals" yanitini dogrular.
  *
- *  Config modunda C1 C1 C1 gonderilir; E32 kalici ayarlari 6 byte
- *  olarak echo'lar: [C0/C1, ADDH, ADDL, SPED, CHAN, OPTION].
- *  Boylece "module gercekten ne yazildi" sorusu kesin cevap alir.
+ *  E32'deki "gonderilen byte'larin aynen echo'su" mantigi burada
+ *  GECERSIZDIR — E22'de yanit basligi (ve komut byte'i) HER ZAMAN C1'dir,
+ *  C0 DEGIL.
  *
- *  Lora_Init() icinde config moduna girildikten SONRA, WriteConfig
- *  ONCESINDE cagrilan versiyonu: "yazma oncesi ne vardi" gosterir.
- *  Yazma SONRASI tekrar cagrilirsa "ne yazildi" dogrulama saglar.
+ *  CRYPT (E22_REG_CRYPT_H/L) alanlari yazilir AMA geri OKUNAMAZ; bu yuzden
+ *  dogrulama karsilastirmasindan (yaniti vals ile eslestirme) CRYPT
+ *  adresleri HARIC TUTULUR — aksi halde her yazim, gecerli olsa bile
+ *  CRYPT uyumsuzlugu yuzunden LORA_ERR donerdi.
  * ========================================================================= */
-static void Lora_ReadConfig(UART_HandleTypeDef *huart)
+static LoraStatus_t E22_WriteRegsSaved(UART_HandleTypeDef *huart, uint8_t addr,
+                                       uint8_t len, const uint8_t *vals)
 {
-    const uint8_t read_cmd[3] = {0xC1U, 0xC1U, 0xC1U};
-    uint8_t resp[6] = {0};
+    if (len == 0U || len > E22_REG_BLOCK_LEN) return LORA_ERR;
 
-    /* Onceki artik baytlari temizle */
+    uint8_t cmd[3U + E22_REG_BLOCK_LEN];
+    cmd[0] = E22_CMD_WRITE_SAVED;
+    cmd[1] = addr;
+    cmd[2] = len;
+    memcpy(&cmd[3], vals, len);
+
     __HAL_UART_CLEAR_OREFLAG(huart);
+    if (HAL_UART_Transmit(huart, cmd, (uint16_t)(3U + len), 200U) != HAL_OK)
+        return LORA_ERR;
 
-    if (HAL_UART_Transmit(huart, (uint8_t *)read_cmd, 3U, 200U) != HAL_OK) {
-        printf("[CFG] Okuma komutu gonderilemedi.\r\n");
-        return;
-    }
+    /* Flash yazma tamamlansin (AUX LOW->HIGH) */
+    if (E22_WaitAuxHigh(E22_AUX_CFG_TIMEOUT_MS) != LORA_OK)
+        return LORA_ERR_TIMEOUT;
 
-    HAL_StatusTypeDef st = HAL_UART_Receive(huart, resp, 6U, 500U);
-
-    /* KRITIK: Bloklayan HAL_UART_Receive HAL_TIMEOUT ile bitince RxState
-     * BUSY_RX'te takili kalabiliyor. Bu durumda sonradan cagrilan
-     * HAL_UART_Receive_IT ya HAL_BUSY doner ya da arm edilse bile callback
-     * tetiklenmez -> rx_byte=0. Her cikista state'i READY'e cek. */
-    if (st != HAL_OK) {
+    uint8_t hdr[3] = {0};
+    if (HAL_UART_Receive(huart, hdr, sizeof(hdr), 500U) != HAL_OK)
+    {
         HAL_UART_Abort(huart);
         __HAL_UART_CLEAR_OREFLAG(huart);
-        printf("[CFG] Echo alinamadi (st=%d) — E32 echo'lamayabilir (normal).\r\n",
-               (int)st);
-        return;
+        return LORA_ERR_TIMEOUT;
     }
 
-    printf("[CFG] E32 mevcut ayarlar:\r\n");
-    printf("      Ham  : %02X %02X %02X %02X %02X %02X\r\n",
-           resp[0], resp[1], resp[2], resp[3], resp[4], resp[5]);
-    printf("      ADDH=0x%02X  ADDL=0x%02X\r\n", resp[1], resp[2]);
-    printf("      SPED=0x%02X  (hedef: 0x1A = 8N1|9600|2.4k)\r\n", resp[3]);
-    printf("      CHAN=0x%02X  (hedef: 0x17 = 433 MHz)\r\n",        resp[4]);
-    printf("      OPTION=0x%02X (hedef: 0x47 = 30dBm|FEC|PP)\r\n", resp[5]);
+    if (memcmp(hdr, E22_RSP_BAD, sizeof(hdr)) == 0)
+        return LORA_ERR;   /* FF FF FF: modul yazmayi reddetti */
 
-    /* Kritik alanlari dogrula */
-    uint8_t ok = 1U;
-    if (resp[3] != 0x1AU) { printf("  !! SPED YANLIS — UART baud veya air rate uyumsuz!\r\n"); ok=0; }
-    if (resp[4] != 0x17U) { printf("  !! CHAN YANLIS  — RF kanal uyumsuz!\r\n");               ok=0; }
-    if (resp[5] != 0x47U) { printf("  !! OPTION YANLIS — guc/FEC uyumsuz!\r\n");              ok=0; }
-    if (ok)               { printf("  [OK] Tum alanlar hedef degerle esiyor.\r\n"); }
+    /* Yanit basligi C1'dir (C0 DEGIL) — bkz. yukaridaki fonksiyon yorumu */
+    if (hdr[0] != E22_CMD_READ || hdr[1] != addr || hdr[2] != len)
+        return LORA_ERR;
+
+    uint8_t resp_vals[E22_REG_BLOCK_LEN] = {0};
+    if (HAL_UART_Receive(huart, resp_vals, len, 500U) != HAL_OK)
+    {
+        HAL_UART_Abort(huart);
+        __HAL_UART_CLEAR_OREFLAG(huart);
+        return LORA_ERR_TIMEOUT;
+    }
+
+    for (uint8_t i = 0U; i < len; i++)
+    {
+        uint8_t reg_addr = (uint8_t)(addr + i);
+        if (reg_addr == E22_REG_CRYPT_H || reg_addr == E22_REG_CRYPT_L)
+            continue;   /* geri okunamaz — dogrulama disi */
+        if (resp_vals[i] != vals[i])
+            return LORA_ERR;
+    }
+    return LORA_OK;
+}
+
+/* =========================================================================
+ * Boot-log: register blogunu hex dump'la (bench dump teyidi icin — HER
+ * boot'ta, yazma yapilsa da yapilmasa da basilir).
+ * ========================================================================= */
+static void E22_DumpBlock(const char *baslik, const uint8_t *blk, uint8_t len)
+{
+    printf("[CFG] %s:\r\n", baslik);
+    for (uint8_t i = 0U; i < len; i++)
+        printf("E22REG,0x%02X,0x%02X\r\n",
+               (unsigned)(E22_REG_BLOCK_START + i), (unsigned)blk[i]);
 }
 
 /* =========================================================================
  * Lora_Init — public API
  *
- *  1. GPIO: M0/M1 → output LOW (normal mod), AUX → input pull-up
- *  2. E32 boot: AUX HIGH bekle
- *  3. Config moduna gir
- *  4. Ayarlari flash'a yaz ve echo dogrula
- *  5. Normal moda don
+ *  1. GPIO: M0/M1 -> output LOW (normal mod), AUX -> input pull-up
+ *  2. E22 boot: AUX HIGH bekle
+ *  3. Config moduna gir (M0=0, M1=1)
+ *  4. TUM register blogunu (ADDH..CRYPT_L) C1 ile oku, hex dump'la
+ *  5. ADDH..REG3 (CRYPT haric — geri okunamaz) hedefle ayniysa YAZMA
+ *     (flash omru); farkliysa C0 ile yaz, yaniti dogrula, tekrar oku +
+ *     dump'la
+ *  6. Normal moda don
  * ========================================================================= */
 LoraStatus_t Lora_Init(LoraCtx_t *ctx, UART_HandleTypeDef *huart)
 {
@@ -237,24 +260,24 @@ LoraStatus_t Lora_Init(LoraCtx_t *ctx, UART_HandleTypeDef *huart)
     ctx->rx_active = 0U;          /* FIX-4: henuz RX baslamadi */
 
     /* 1. GPIO hazirla */
-    E32_GPIO_Init();
+    E22_GPIO_Init();
 
     /* AUX TANI: boot oncesi pin durumunu goster.
-     * Eger E32 baglantiyi kontrol et mesaji cikiyorsa AUX floating olabilir. */
+     * Eger "AUX zaman asimi" mesaji cikiyorsa AUX floating olabilir. */
     {
         uint8_t aux_now = (HAL_GPIO_ReadPin(LORA_AUX_GPIO_Port, LORA_AUX_Pin) == GPIO_PIN_SET) ? 1U : 0U;
         printf("[AUX] Boot oncesi AUX=%u  M0=%u  M1=%u\r\n",
                aux_now,
-               (HAL_GPIO_ReadPin(GPIOB, E32_M0_Pin) == GPIO_PIN_SET) ? 1U : 0U,
-               (HAL_GPIO_ReadPin(GPIOB, E32_M1_Pin) == GPIO_PIN_SET) ? 1U : 0U);
+               (HAL_GPIO_ReadPin(GPIOB, E22_M0_Pin) == GPIO_PIN_SET) ? 1U : 0U,
+               (HAL_GPIO_ReadPin(GPIOB, E22_M1_Pin) == GPIO_PIN_SET) ? 1U : 0U);
     }
 
-    /* 2. Modül boot AUX HIGH bekle */
-    if (E32_WaitAuxHigh(E32_AUX_BOOT_TIMEOUT_MS) != LORA_OK)
+    /* 2. Modul boot AUX HIGH bekle */
+    if (E22_WaitAuxHigh(E22_AUX_BOOT_TIMEOUT_MS) != LORA_OK)
         return LORA_ERR_TIMEOUT;
 
     /* 3. Config moduna gir */
-    if (E32_EnterConfigMode(huart) != LORA_OK)
+    if (E22_EnterConfigMode(huart) != LORA_OK)
         return LORA_ERR_TIMEOUT;
 
     /* Config modu sonrasi pin durumu */
@@ -262,34 +285,82 @@ LoraStatus_t Lora_Init(LoraCtx_t *ctx, UART_HandleTypeDef *huart)
         uint8_t aux_now = (HAL_GPIO_ReadPin(LORA_AUX_GPIO_Port, LORA_AUX_Pin) == GPIO_PIN_SET) ? 1U : 0U;
         printf("[AUX] Config modunda AUX=%u  M0=%u  M1=%u\r\n",
                aux_now,
-               (HAL_GPIO_ReadPin(GPIOB, E32_M0_Pin) == GPIO_PIN_SET) ? 1U : 0U,
-               (HAL_GPIO_ReadPin(GPIOB, E32_M1_Pin) == GPIO_PIN_SET) ? 1U : 0U);
+               (HAL_GPIO_ReadPin(GPIOB, E22_M0_Pin) == GPIO_PIN_SET) ? 1U : 0U,
+               (HAL_GPIO_ReadPin(GPIOB, E22_M1_Pin) == GPIO_PIN_SET) ? 1U : 0U);
     }
 
-    /* Yazma oncesi mevcut ayarlari goster */
-    printf("[CFG] --- Yazma oncesi E32 ayarlari ---\r\n");
-    Lora_ReadConfig(huart);
+    /* 4. Read-before-write: TUM blogu oku ve dump'la */
+    uint8_t cur[E22_REG_BLOCK_LEN] = {0};
+    LoraStatus_t read_st = E22_ReadRegs(huart, E22_REG_BLOCK_START,
+                                        E22_REG_BLOCK_LEN, cur);
+    LoraStatus_t cfg_st;
 
-    /* 4. Ayarlari yaz */
-    LoraStatus_t cfg_st = E32_WriteConfig(huart);
+    if (read_st != LORA_OK)
+    {
+        printf("[CFG] Blok okunamadi (st=%d) — yazma denenecek.\r\n", (int)read_st);
 
-    /* Yazma sonrasi dogrula */
-    printf("[CFG] --- Yazma sonrasi E32 ayarlari ---\r\n");
-    Lora_ReadConfig(huart);
+        const uint8_t target_full[E22_REG_BLOCK_LEN] = E22_WRITE_BLOCK_INIT;
+        cfg_st = E22_WriteRegsSaved(huart, E22_REG_BLOCK_START,
+                                    E22_REG_BLOCK_LEN, target_full);
+
+        if (cfg_st == LORA_OK)
+        {
+            uint8_t after[E22_REG_BLOCK_LEN] = {0};
+            if (E22_ReadRegs(huart, E22_REG_BLOCK_START, E22_REG_BLOCK_LEN, after) == LORA_OK)
+                E22_DumpBlock("Yazma sonrasi", after, E22_REG_BLOCK_LEN);
+        }
+    }
+    else
+    {
+        E22_DumpBlock("Mevcut ayarlar (yazma oncesi)", cur, E22_REG_BLOCK_LEN);
+
+        const uint8_t target_verify[E22_REG_VERIFY_LEN] = E22_TARGET_BLOCK_INIT;
+        uint8_t needs_write = 0U;
+        for (uint8_t i = 0U; i < E22_REG_VERIFY_LEN; i++)
+        {
+            if (cur[i] != target_verify[i]) { needs_write = 1U; break; }
+        }
+
+        if (!needs_write)
+        {
+            /* Read-before-write: ADDH..REG3 zaten hedefle ayni -> YAZMA.
+             * CRYPT geri okunamadigi icin karsilastirma disi (bkz.
+             * E22_REG_VERIFY_LEN); flash omru boylece korunur. */
+            printf("[CFG] Tum alanlar (ADDH..REG3) hedefle ayni — YAZMA ATLANDI (flash omru).\r\n");
+            cfg_st = LORA_OK;
+        }
+        else
+        {
+            printf("[CFG] En az bir alan hedeften farkli — flash'a yaziliyor.\r\n");
+            const uint8_t target_full[E22_REG_BLOCK_LEN] = E22_WRITE_BLOCK_INIT;
+            cfg_st = E22_WriteRegsSaved(huart, E22_REG_BLOCK_START,
+                                        E22_REG_BLOCK_LEN, target_full);
+
+            if (cfg_st == LORA_OK)
+            {
+                uint8_t after[E22_REG_BLOCK_LEN] = {0};
+                if (E22_ReadRegs(huart, E22_REG_BLOCK_START, E22_REG_BLOCK_LEN, after) == LORA_OK)
+                    E22_DumpBlock("Yazma sonrasi", after, E22_REG_BLOCK_LEN);
+            }
+            else
+            {
+                printf("[CFG] Yazma/dogrulama basarisiz (st=%d).\r\n", (int)cfg_st);
+            }
+        }
+    }
 
     /* 5. Normal moda gecmeden once UART'i sifirla.
-     * Yukaridaki tum bloklayan HAL_UART_Receive cagrilari (ReadConfig x2,
-     * WriteConfig echo) timeout'la bitmis olabilir ve donanim/HAL state'inde
-     * artik veri, ORE/NE/FE bayraklari veya BUSY_RX birakmis olabilir.
-     * Bunlar temizlenmezse Lora_StartReceive arm edilse bile IT-RX sagir
-     * kalir -> rx_byte=0. */
+     * Yukaridaki tum bloklayan HAL_UART_Receive cagrilari timeout'la
+     * bitmis olabilir ve donanim/HAL state'inde artik veri, ORE/NE/FE
+     * bayraklari veya BUSY_RX birakmis olabilir. Bunlar temizlenmezse
+     * Lora_StartReceive arm edilse bile IT-RX sagir kalir -> rx_byte=0. */
     HAL_UART_Abort(huart);
     __HAL_UART_CLEAR_OREFLAG(huart);
     __HAL_UART_CLEAR_NEFLAG(huart);
     __HAL_UART_CLEAR_FEFLAG(huart);
 
     /* 6. Hata olsa da normal moda don — modul calismali */
-    if (E32_EnterNormalMode() != LORA_OK)
+    if (E22_EnterNormalMode() != LORA_OK)
         return LORA_ERR_TIMEOUT;
 
     /* Normal moda geçiş sonrasi AUX stabilizasyonu */
@@ -310,7 +381,7 @@ LoraStatus_t Lora_Init(LoraCtx_t *ctx, UART_HandleTypeDef *huart)
 }
 
 /* =========================================================================
- * Geri kalan public API
+ * Geri kalan public API — TX/RX veri duzlemi, E32 ile birebir AYNI
  * ========================================================================= */
 void Lora_SetRxByteHandler(LoraCtx_t *ctx, LoraRxCb_t cb, void *user)
 {
@@ -373,10 +444,10 @@ static LoraStatus_t Lora_TxSafe(LoraCtx_t *ctx, const uint8_t *data,
 
     /* AUX kontrolu */
     if (block_aux) {
-        if (E32_WaitAuxHigh(200U) != LORA_OK)
+        if (E22_WaitAuxHigh(200U) != LORA_OK)
             return LORA_ERR_BUSY;            /* normal veri: mesgulse atla */
     } else {
-        (void)E32_WaitAuxHigh(50U);          /* kritik: timeout olsa da devam */
+        (void)E22_WaitAuxHigh(50U);          /* kritik: timeout olsa da devam */
     }
 
     /* 1. IT-RX'i guvenli durdur */

@@ -10,10 +10,14 @@
   *  BUG #6 : Klon-guvenli saat — HSI 8 MHz, PLL yok
   *  BUG #7 : USART1 115200 baud (9600'de dashboard 730 ms sürüyordu)
   *  BUG #8 : Debounce boot edge case — (uint32_t)(-2000) ile baslatma
-  *  FIX-E32: M0/M1 artik PB6/PB7 — Lora_Init() icinde config moduna
-  *           alinip E32_CFG_* degerleri flash'a kalici olarak yazilir.
-  *           Eski kodda bu pinler floating kaliyor, modul mod belirsiz
-  *           hale geliyordu → rx_byte = 0.
+  *  FIX-E22: M0/M1 artik PB6/PB7 — Lora_Init() icinde config moduna
+  *           alinip register blogu (e22_regs.h hedefleri) flash'a kalici
+  *           olarak yazilir (read-before-write: zaten hedefle ayniysa
+  *           yazmaz). Eski kodda bu pinler floating kaliyor, modul mod
+  *           belirsiz hale geliyordu → rx_byte = 0.
+  *  E32->E22: LoRa donanimi E32-433T30D'den E22-400T30D-V2'ye (SX1268,
+  *           30 dBm) geciyor; config protokolu register-tabanli C0/C1
+  *           komutlarina degisti (bkz. Core/Inc/e22_regs.h, Core/Src/lora.c).
   *
   *  YENI DUZELTMELER:
   *  FIX-A (KRITIK): E-STOP artik Lora_SendCritical ile gonderiliyor.
@@ -216,29 +220,49 @@ int main(void)
     printf("    Saat      : HSI 8 MHz (PLL yok)\r\n");
     printf("    Monitor   : USART1 115200 baud\r\n");
     printf("    LoRa UART : USART2 9600 baud\r\n");
-    printf("    E32 ayar  : SPED=0x%02X (9600 UART | 2.4kbps air)  "
-           "CHAN=0x%02X  OPTION=0x%02X\r\n",
-           E32_CFG_SPED, E32_CFG_CHAN, E32_CFG_OPTION);
-    printf("    (hedef: SPED=0x1A | CHAN=0x17 | OPTION=0x47)\r\n");
+    /* Boot mesaji e22_regs.h HEDEF degerlerinden turetilir — hicbir sayi
+     * burada ayrica hardcode edilmez (bkz. e22_regs.h decode yardimcilari). */
+    {
+        uint32_t freq_x1000 = E22_DecodeFreqMhzX1000(E22_VAL_REG2);
+        printf("    E22 hedef : UART=%lu baud | hava hizi=%lu bps | "
+               "guc kademesi=%u (0=en yuksek) | %lu.%03lu MHz\r\n",
+               (unsigned long)E22_DecodeUartBaud(E22_VAL_REG0),
+               (unsigned long)E22_DecodeAirRateBps(E22_VAL_REG0),
+               (unsigned)E22_DecodeTxPowerStep(E22_VAL_REG1),
+               (unsigned long)(freq_x1000 / 1000U),
+               (unsigned long)(freq_x1000 % 1000U));
+        printf("      (REG0=0x%02X REG1=0x%02X REG2=0x%02X — bkz. Core/Inc/e22_regs.h)\r\n",
+               (unsigned)E22_VAL_REG0, (unsigned)E22_VAL_REG1, (unsigned)E22_VAL_REG2);
+    }
 
     Telemetry_Init(&tel_ctx);
 
     /*
      * Lora_Init() siralari:
      *   1. PB6/PB7 → output LOW  (normal mod, floating degil)
-     *   2. AUX HIGH bekle         (E32 boot tamamlansin)
-     *   3. Config moduna gec
-     *   4. E32_CFG_* degerlerini flash'a yaz + echo dogrula
+     *   2. AUX HIGH bekle         (E22 boot tamamlansin)
+     *   3. Config moduna gec      (M0=0, M1=1 — E32'den FARKLI)
+     *   4. Register blogunu (ADDH..CRYPT_L) oku + hex dump'la; hedeften
+     *      (e22_regs.h) farkliysa C0 ile flash'a yaz ve dogrula
      *   5. Normal moda don
      */
     LoraStatus_t ls = Lora_Init(&lora_ctx, &huart2);
     if (ls == LORA_OK)
-        printf("[OK] LoRa hazir: 30 dBm | 2.4 kbps hava hizi | 433 MHz\r\n");
+    {
+        uint32_t freq_x1000 = E22_DecodeFreqMhzX1000(E22_VAL_REG2);
+        printf("[OK] LoRa hazir: guc kademesi %u (0=en yuksek, T30D max 30 dBm) | "
+               "%lu bps hava hizi | %lu.%03lu MHz\r\n",
+               (unsigned)E22_DecodeTxPowerStep(E22_VAL_REG1),
+               (unsigned long)E22_DecodeAirRateBps(E22_VAL_REG0),
+               (unsigned long)(freq_x1000 / 1000U),
+               (unsigned long)(freq_x1000 % 1000U));
+    }
     else if (ls == LORA_ERR_TIMEOUT)
         printf("[WARN] LoRa AUX zaman asimi — donanim / besleme kontrol edin.\r\n");
     else
-        printf("[ERR] LoRa config echo hatasi (ls=%d) — modul calisiyor "
-               "olabilir ama ayarlar yazilmamis.\r\n", (int)ls);
+        printf("[ERR] LoRa config okuma/yazma hatasi (ls=%d) — FF FF FF ya da "
+               "beklenmeyen yanit basligi; modul calisiyor olabilir ama "
+               "ayarlar teyit edilemedi.\r\n", (int)ls);
 
     Lora_SetRxByteHandler(&lora_ctx, on_lora_rx_byte, &tel_ctx);
 
@@ -380,8 +404,8 @@ static void MX_USART1_UART_Init(void)
 }
 
 /* ====================================================================
- * USART2 — LoRa E32 (PA2=TX, PA3=RX), 9600 baud
- * E32 fabrika UART hizi 9600 baud. E32_CFG_SPED de 9600 yazilir.
+ * USART2 — LoRa E22-400T30D-V2 (PA2=TX, PA3=RX), 9600 baud
+ * E22 fabrika UART hizi 9600 baud. REG0 de 9600 yazilir (e22_regs.h).
  * ==================================================================== */
 static void MX_USART2_UART_Init(void)
 {
@@ -398,8 +422,8 @@ static void MX_USART2_UART_Init(void)
 
 /* ====================================================================
  * GPIO Init.
- * NOT: PB6 (E32_M0) ve PB7 (E32_M1) BURADA degil, Lora_Init() →
- *      E32_GPIO_Init() icinde ayarlaniyor. MX_GPIO_Init() cagrildiginda
+ * NOT: PB6 (E22_M0) ve PB7 (E22_M1) BURADA degil, Lora_Init() →
+ *      E22_GPIO_Init() icinde ayarlaniyor. MX_GPIO_Init() cagrildiginda
  *      bu pinler henuz output degil; LORA_UART init'ten once modulu
  *      config moduna almamak icin bu siralama kasitlidir.
  * ==================================================================== */
