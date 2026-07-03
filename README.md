@@ -4,7 +4,7 @@
 
 **Repo:** `TFN-Software-Team/TUFAN-UKS-TELEMETRY` · **Branch:** `ravza`
 **MCU:** STM32F103 (Cortex-M3) · **HAL:** STM32 HAL (RTOS yok, bare-metal ana döngü)
-**Görev:** TUFAN elektrikli araç projesinde, aracın (AKS) gönderdiği telemetriyi alıp ekrana basan ve operatörden gelen komutları (özellikle E-STOP) LoRa üzerinden araca ileten yer istasyonu.
+**Görev:** TUFAN elektrikli araç projesinde, aracın (AKS) gönderdiği telemetriyi alıp ekrana basan yer istasyonu. Yönetmelik 9.2.a gereği RF hattı **tek yönlüdür**: UKS → AKS yönünde yalnızca stabilizasyon teyidi amaçlı 0xB0 heartbeat'i gönderilir, komut kanalı yoktur (bkz. [UYUM_NOTU.md](./UYUM_NOTU.md)).
 
 ---
 
@@ -29,10 +29,10 @@ UKS-Telemetry/
 │   │   ├── lora.h          — LoraCtx_t, public API (E22 register sabitleri e22_regs.h'de)
 │   │   └── e22_regs.h      — E22 register adresleri/hedef değerleri (tek doğruluk kaynağı)
 │   └── Src/
-│       ├── main.c          — sistem init, ana döngü, E-STOP ISR, E-STOP TX
-│       ├── telemetry.c     — CSV parser, frame kuyruğu, dashboard, encoder
+│       ├── main.c          — sistem init, ana döngü, heartbeat TX
+│       ├── telemetry.c     — CSV parser, frame kuyruğu, dashboard
 │       ├── lora.c          — E22 GPIO/config/TX-RX sürücüsü
-│       ├── stm32f1xx_it.c  — kesme handler'ları (EXTI0, USART2)
+│       ├── stm32f1xx_it.c  — kesme handler'ları (USART2)
 │       └── stm32f1xx_hal_msp.c — HAL MSP init (NVIC öncelikleri burada set edilir)
 └── UKS-Telemetry.ioc        — CubeMX proje dosyası (RCC, GPIO, USART tanımları)
 ```
@@ -43,13 +43,13 @@ UKS-Telemetry/
 
 | Pin | İşlev | Açıklama |
 |---|---|---|
-| PA0 | `AC_L_STOP` | Acil durdurma butonu — EXTI falling edge, internal pull-up |
 | PA2 / PA3 | USART2 TX/RX | E22 LoRa modülü — **9600 baud** |
 | PA9 / PA10 | USART1 TX/RX | Seri monitör / ekran çıkışı — **115200 baud** |
 | PB6 | `E22_M0_Pin` | E22 mod seçim biti — Normal=LOW, Config=LOW |
 | PB7 | `E22_M1_Pin` | E22 mod seçim biti — Normal=LOW, Config=HIGH |
 | PB10 | `LORA_AUX` | E22 hazır/meşgul sinyali — HIGH=hazır, açık-kolektör + pull-up (input) |
-| PB11 | `MOTOR_EN` | Durum çıkışı — HIGH=nominal, LOW=E-STOP aktif |
+
+> 9.2.a: eski PA0 ve PB11 pin atamaları (uzaktan durdurma donanımı) kaldırıldı — acil durdurma araç üstündeki fiziksel kontaktörle sağlanır, RF/UKS'ten bağımsızdır.
 
 **Saat kaynağı:** HSI 8 MHz, **PLL kapalı** (kasıtlı — bkz. §6, BUG #6). USART1 @ 115200 baud, HSI 8 MHz'de BRR hata payı ~%0.16 (sınır %2'nin çok altında).
 
@@ -106,7 +106,7 @@ Boot sırasında `Lora_Init()` şu sırayı izler: GPIO hazırla → AUX HIGH be
 
 > ⚠️ E32'nin formülü `410 + CHAN` idi (tam sayı ofset); E22'de sabit ofset **`410.125`**'tir — bu farkı gözden kaçırmak kanalı ~125 kHz kaydırır.
 
-**Neden RSSI byte'ı kapalı (REG3 bit7=0):** Açılırsa E22 her alınan paketin sonuna 1 byte RSSI ekler; UKS satır-parser'ı (`telemetry.c`, `TEL_FIELD_COUNT=19` sabit alan sayımına dayanır) ve AKS komut/heartbeat RX'i bu ekstra byte'ı veri sanıp parser'ı bozar. Link kalitesi ileride istenirse ayrı, koordineli bir iş (her iki tarafta protokol versiyon bump'ıyla) olarak yapılır.
+**Neden RSSI byte'ı kapalı (REG3 bit7=0):** Açılırsa E22 her alınan paketin sonuna 1 byte RSSI ekler; UKS satır-parser'ı (`telemetry.c`, `TEL_FIELD_COUNT=19` sabit alan sayımına dayanır) ve AKS heartbeat RX'i bu ekstra byte'ı veri sanıp parser'ı bozar. Link kalitesi ileride istenirse ayrı, koordineli bir iş (her iki tarafta protokol versiyon bump'ıyla) olarak yapılır.
 
 **CRYPT neden doğrulanmıyor:** `CRYPT_H`/`CRYPT_L` E22'de yazılabilir ama **geri okunamaz** (okuma her zaman anlamsız/farklı veri döner) — bu yüzden hem read-before-write karşılaştırması hem yazma-sonrası doğrulama bu iki adresi kapsam dışı tutar (`E22_REG_VERIFY_LEN=7`, yalnızca `ADDH..REG3`).
 
@@ -122,44 +122,59 @@ AUX zaman aşımları: Boot=3000ms, Mode=500ms, CFG=2000ms (E32'den devralınan 
 
 ## 4. Protokol — AKS ↔ UKS
 
-### AKS → UKS Telemetri (ASCII CSV, 5 Hz, CRLF sonlu)
+### AKS → UKS Telemetri (ASCII CSV, v2, CRLF sonlu)
+
+> **Kaynak:** Bu tablo `UKS-Telemetry/README.md` içindeki "UKS Uyum
+> Sözleşmesi" bölümünden türetilmiştir — o bölüm kod (`Core/Src/telemetry.c::Decode_Line`)
+> ile birebir doğrulanan, protokolün **tek doğruluk kaynağı**dır. Burada
+> uyuşmazlık çıkarsa oradaki tanım geçerlidir.
 
 ```
-TEL,<ver>,<seq>,<rpm>,<torq>,<merr>,<mvalid>,<mtout>,<soc>,<bcurr>,<btemp>,<bvolt>,<bcell>,<berr>,<bvalid>\r\n
+TEL,ver,seq,rpm,torque,motorErr,motorValid,motorTimeout,cellVMax,cellVMin,
+    tempH,tempL,sysState,packV,current,soc,bmsValid,ts_ms,spd_x10\r\n
 ```
 
-**Tam olarak 15 alan** — bu sert bir protokol kontratıdır, alan sayısı/sırası değişirse hem AKS encoder hem UKS parser eş zamanlı güncellenmeli (protokol versiyon bump'ı gerektirir).
+**Tam olarak 19 alan** (ilk alan literal `TEL` + 18 sayısal alan) — bu sert bir protokol kontratıdır (`TEL_FIELD_COUNT=19`), alan sayısı/sırası değişirse hem AKS encoder hem UKS parser eş zamanlı güncellenmeli (protokol versiyon bump'ı gerektirir). Alan sayısı 19'dan farklıysa veya `ver != 2` ise paket tümüyle reddedilir.
 
-| # | Alan | Tip | Aralık |
-|---|---|---|---|
-| 0 | `TEL` | literal | — |
-| 1 | protokol versiyonu | uint8 | 0–255 (şu an: 1) |
-| 2 | sequence | uint32 | 0–2147483647 |
-| 3 | motor RPM | uint16 | 0–65535 (sanity: ≤20000) |
-| 4 | motor tork | int16 | -32768..32767 |
-| 5 | motor hata bayrakları | uint8 | 0–255 |
-| 6 | motor data valid | 0/1 | — |
-| 7 | motor timeout aktif | 0/1 | — |
-| 8 | BMS SOC | uint8 | 0–100 |
-| 9 | BMS akım (deci-A) | int16 | -32768..32767 |
-| 10 | BMS sıcaklık (°C) | int16 | -40..120 |
-| 11 | BMS pack voltajı (deci-V) | uint16 | 0–65535 |
-| 12 | BMS ortalama hücre voltajı (mV) | uint16 | 0–65535 |
-| 13 | BMS hata bayrakları | uint8 | 0–255 |
-| 14 | BMS data valid | 0/1 | — |
+| # | Alan | Tip | Ölçek | Geçerli aralık | Açıklama |
+|---|---|---|---|---|---|
+| 0 | `TEL` | — | — | literal | Sabit etiket |
+| 1 | `ver` | uint8 | — | 0..255 (`TEL_PROTOCOL_VERSION`=2 zorunlu) | Protokol versiyonu |
+| 2 | `seq` | uint32 | — | 0..4294967295 | Sıra numarası (gap/dup tespiti) |
+| 3 | `rpm` | uint16 | ham | 0..65535 (sanity ≤20000) | Motor RPM |
+| 4 | `torque` | int16 | ham | -32768..32767 | Motor tork geri beslemesi |
+| 5 | `motorErr` | uint8 | bit bayrak | 0..255 | Motor hata bayrakları |
+| 6 | `motorValid` | uint8 | bool | 0..1 | Motor verisi geçerli mi |
+| 7 | `motorTimeout` | uint8 | bool | 0..1 | Motor timeout aktif mi |
+| 8 | `cellVMax` | uint16 | ×0.1 mV | 0..65535 | En yüksek hücre voltajı |
+| 9 | `cellVMin` | uint16 | ×0.1 mV | 0..65535 | En düşük hücre voltajı |
+| 10 | `tempH` | int16 (kaynak int8) | °C | -128..127 | En yüksek BMS sıcaklığı |
+| 11 | `tempL` | int16 (kaynak int8) | °C | -128..127 | En düşük BMS sıcaklığı |
+| 12 | `sysState` | uint8 | enum | 1..4 | 1=Discharge 2=IDLE 3=Charge 4=FAULT |
+| 13 | `packV` | uint16 | ×0.1 V | 0..65535 | Pack voltajı |
+| 14 | `current` | int32 | ×0.01 mA | -2147483647..2147483647 | Pack akımı (+şarj / -deşarj) |
+| 15 | `soc` | uint16 | ×0.01 % | 0..10000 (10000=%100.00) | Şarj durumu |
+| 16 | `bmsValid` | uint8 | bool | 0..1 | BMS verisi geçerli mi |
+| 17 | `ts_ms` | uint32 | ms | 0..4294967295 | AKS boot'tan beri geçen süre |
+| 18 | `spd_x10` | uint16 | ×0.1 km/h | 0..3000 | Araç hızı |
 
-### UKS → AKS Komutlar (tek byte, framing/CRC YOK)
+**Yönetmelik 9.2 şartname eşlemesi** (bkz. [UYUM_NOTU.md](./UYUM_NOTU.md)):
 
-| Sembol | Değer | Anlam |
+| Alan | Madde | Not |
 |---|---|---|
-| `UKS_CMD_EMERGENCY_STOP` | 0xA1 | Acil durdurma |
-| `UKS_CMD_START` | 0xA2 | IDLE → READY isteği |
-| `UKS_CMD_STOP` | 0xA3 | Reset / durdurma |
-| `UKS_CMD_DRIVE_ENABLE` | 0xA4 | READY → DRIVE isteği |
+| `tempH` | 9.2.c.ii ("en yüksek batarya sıcaklığı") | Solion BMS bu değeri donanımda hesaplayıp veriyor; AKS yalnızca pass-through yapar |
+| `packV` | 9.2.c.iv | — |
+| `spd_x10` | 9.2.c.i | — |
+| `ts_ms` | 9.2.h | — |
 
-E-STOP, paket kaybına karşı **3 kez ardışık** (`TEL_ESTOP_BURST_COUNT`) gönderilir — AKS tarafı tek byte beklediği için herhangi bir RX okumasında E-STOP olarak yorumlanır.
+### UKS → AKS yönü: yalnızca heartbeat
 
-> v1 bilinçli tasarım kararı: RF framing veya CRC yok. Bu, gürültülü RF ortamında tek byte'lık komutların (özellikle DRIVE_ENABLE) yanlış yorumlanma riskini taşır; bilinen ve kabul edilmiş bir sınırlamadır.
+Yönetmelik 9.2.a gereği UKS → AKS yönünde eskiden var olan tek-byte komut
+kanalı (`UKS_CMD_EMERGENCY_STOP` 0xA1, `UKS_CMD_START` 0xA2, `UKS_CMD_STOP`
+0xA3, `UKS_CMD_DRIVE_ENABLE` 0xA4) sistemden tamamen kaldırılmıştır. Bu
+yönde gönderilen **tek byte** `LORA_HEARTBEAT_BYTE` (0xB0) — içerik
+taşımayan, ~1 Hz periyodik bir stabilizasyon teyididir (bkz. §6). Acil
+durdurma araç üstündeki fiziksel kontaktörle sağlanır, RF'ten bağımsızdır.
 
 ---
 
@@ -181,7 +196,7 @@ Telemetry_RxBytePush()  [ISR, USART2 RxCplt]
 Telemetry_Process()  [ana döngü, her turda çağrılır]
   → Ring'deki bekleyen byte'ları sırayla Process_Byte()'a yollar.
   → Process_Byte satırı line_buf'ta biriktirir, '\n' görünce Decode_Line() çağırır.
-  → Decode_Line: Tokenize (15 alan) → her alanı Parse_Int ile range-check →
+  → Decode_Line: Tokenize (19 alan) → her alanı Parse_Int/Parse_U32 ile range-check →
     Track_Sequence (gap/dup tespiti) → Commit_Frame (frame_q'ya yayınla).
 
 Telemetry_Parse()  [ana döngü, dashboard basmadan önce]
@@ -197,13 +212,9 @@ Hem `rx_ring` hem `frame_q` **tek-üretici/tek-tüketici** olduğu için kritik 
 
 `Decode_Line` her alanı hem format hem sanity aralığına göre doğrular (örn. RPM ≤ 20000, SOC ≤ 100, sıcaklık -40..120°C). Tag (`TEL`) ve protokol versiyonu da ayrıca kontrol edilir.
 
-### E-STOP latch
-
-`Telemetry_SetEStopActive` idempotent'tir — yalnızca ilk çağrıda callback tetiklenir, ISR-safe'tir. E-STOP yalnızca UKS tarafında lokal olarak latch'lenir; AKS bu komutu UKS'e geri yansıtmaz.
-
 ### İstatistikler ve dashboard
 
-`Telemetry_GetStats` üzerinden: rx_bytes, rx_lines, parse_fail, bad_tag, bad_version, range_fail, timeout_drop, overflow_drop, ring_overflow, good_packets, seq_gaps, seq_dup_or_stale, estop_tx_count. Her 3 saniyede bir heartbeat olarak basılır; `Telemetry_PrintDashboard` ise tam ASCII-art dashboard'u SOC bar'ı, motor/BMS detaylarıyla basar (her 3 frame'de bir — `DASH_EVERY_N`, RX'e nefes alanı bırakmak için throttle'lı).
+`Telemetry_GetStats` üzerinden: rx_bytes, rx_lines, parse_fail, bad_tag, bad_version, range_fail, timeout_drop, overflow_drop, ring_overflow, good_packets, seq_gaps, seq_dup_or_stale. Her 3 saniyede bir heartbeat olarak basılır; `Telemetry_PrintDashboard` ise tam ASCII-art dashboard'u SOC bar'ı, motor/BMS detaylarıyla basar (her 3 frame'de bir — `DASH_EVERY_N`, RX'e nefes alanı bırakmak için throttle'lı).
 
 ---
 
@@ -211,35 +222,17 @@ Hem `rx_ring` hem `frame_q` **tek-üretici/tek-tüketici** olduğu için kritik 
 
 ### TX-safe çekirdek — half-duplex çakışma koruması
 
-USART2'de `HAL_UART_Receive_IT` ile byte-byte RX sürerken doğrudan `HAL_UART_Transmit` çağrılırsa HAL'in `__HAL_LOCK` mekanizması yüzünden TX `HAL_BUSY` dönebilir ya da devam eden RX bozulabilir. Bu, komut/E-STOP gönderiminde telemetri akışının donmasına yol açıyordu.
+USART2'de `HAL_UART_Receive_IT` ile byte-byte RX sürerken doğrudan `HAL_UART_Transmit` çağrılırsa HAL'in `__HAL_LOCK` mekanizması yüzünden TX `HAL_BUSY` dönebilir ya da devam eden RX bozulabilir. Bu, heartbeat gönderiminde telemetri akışının donmasına yol açıyordu.
 
 Çözüm — `Lora_TxSafe`:
 1. Devam eden IT-RX varsa güvenli abort et (`rx_active` bayrağıyla takip).
 2. Bloklayan TX yap.
 3. RX önceden aktifse yeniden arm et.
 
-İki varyant:
-- **`Lora_Send`** (`block_aux=1`) — AUX HIGH'ı 200ms bekler, meşgulse `LORA_ERR_BUSY` döner (normal komutlar için).
-- **`Lora_SendCritical`** (`block_aux=0`) — AUX'u sadece 50ms bekler, timeout olsa bile **best-effort gönderir** (E-STOP için — en kritik komutun AUX-busy yüzünden düşmesini önler).
+Tek varyant kaldı:
+- **`Lora_Send`** (`block_aux=1`) — AUX HIGH'ı 200ms bekler, meşgulse `LORA_ERR_BUSY` döner. RF hattındaki tek TX kaynağı olan 0xB0 heartbeat'i bununla gönderilir (best-effort — başarısızsa sessizce atlanır, bir sonraki periyotta tekrar denenir).
 
-### E-STOP uçtan uca akış
-
-```
-PA0 falling edge
-  → EXTI0_IRQHandler → HAL_GPIO_EXTI_Callback
-    → 200ms debounce kontrolü
-    → MOTOR_EN = LOW (fail-safe çıkış, anında)
-    → Telemetry_SetEStopActive() (lokal latch + callback)
-    → estop_tx_pending = 1  (flag set, ISR burada TX YAPMAZ)
-
-Ana döngü, her turda:
-  → process_estop_tx()
-    → pending ise Telemetry_EncodeEStopBurst (3x 0xA1)
-    → Lora_SendCritical ile gönder
-    → Başarısızsa pending tekrar set edilir, bir sonraki turda tekrar denenir
-```
-
-E-STOP ISR'inin **Transmit çağırmaması** kasıtlıdır — bkz. §7 NVIC önceliği deadlock notu.
+> 9.2.a: eski `Lora_SendCritical` (`block_aux=0`, komut gönderimi için kullanılırdı) sistemden tamamen kaldırıldı.
 
 ---
 
@@ -247,13 +240,10 @@ E-STOP ISR'inin **Transmit çağırmaması** kasıtlıdır — bkz. §7 NVIC ön
 
 ```
 SysTick   = öncelik 0  (en yüksek — her zaman ilerlemeli)
-EXTI0     = öncelik 1  (E-STOP)
 USART2    = öncelik 2  (LoRa RX)
 ```
 
-**Gerekçe:** `HAL_UART_Transmit/Receive` timeout ölçümü için `HAL_GetTick()` kullanır; bu sayacı SysTick kesmesi artırır. Eğer bir UART işlemi, SysTick'ten **yüksek** öncelikli bir kesme (örn. EXTI0) içinde kilitlenirse SysTick araya giremez, tick artmaz, timeout asla dolmaz → deadlock.
-
-Bu kod tabanında E-STOP ISR'i zaten `HAL_UART_Transmit` çağırmıyor (sadece bayrak set ediyor), yani pratikte bu deadlock oluşmaz — ama kuşak+askı önlemi olarak SysTick en yüksekte tutuluyor.
+**Gerekçe:** `HAL_UART_Transmit/Receive` timeout ölçümü için `HAL_GetTick()` kullanır; bu sayacı SysTick kesmesi artırır. SysTick en yüksek öncelikte tutulduğu sürece diğer kesmeler tick ilerlemesini bloklayamaz.
 
 NVIC öncelik ayarının **tek kaynağı** `stm32f1xx_hal_msp.c`'deki `HAL_UART_MspInit`'tir — çünkü bu fonksiyon `MX_GPIO_Init`'ten **sonra** (UART init sırasında) çalışır; `MX_GPIO_Init` içinde set edilmiş olsaydı MspInit tarafından ezilirdi.
 
@@ -263,7 +253,7 @@ NVIC öncelik ayarının **tek kaynağı** `stm32f1xx_hal_msp.c`'deki `HAL_UART_
 
 ```
 HAL_Init() → SystemClock_Config() (HSI 8MHz, PLL kapalı)
-  → MX_GPIO_Init()      — E-STOP EXTI, MOTOR_EN (fail-safe HIGH önce), NVIC öncelikleri
+  → MX_GPIO_Init()      — NVIC öncelikleri (SysTick)
   → MX_USART1_UART_Init() (115200 baud — ekran/monitör)
   → MX_USART2_UART_Init() (9600 baud  — LoRa)
   → Telemetry_Init(&tel_ctx)
@@ -273,8 +263,8 @@ HAL_Init() → SystemClock_Config() (HSI 8MHz, PLL kapalı)
 
 Ana döngü (sonsuz):
   now = HAL_GetTick()
-  process_estop_tx()                — bekleyen E-STOP varsa gönder
-  [3 saniyede bir] heartbeat basımı
+  [LORA_HEARTBEAT_PERIOD_MS'te bir] 0xB0 heartbeat TX (Lora_Send)
+  [3 saniyede bir] heartbeat istatistik basımı
   Telemetry_Process(&tel_ctx, now)  — ring buffer'ı işle (Tick'ten ÖNCE — bu turki byte'lar işlensin)
   Telemetry_Tick(&tel_ctx, now)     — yarım satır timeout kontrolü
   [frame hazırsa] Telemetry_Parse + throttle'lı dashboard basımı
@@ -291,18 +281,15 @@ main.c başlığında numaralandırılmış, halen geçerli düzeltmeler:
 | # | Sorun | Çözüm |
 |---|---|---|
 | BUG #4 | printf çıktısı hiçbir yere gitmiyordu | `__io_putchar` → USART1 yönlendirmesi; `_write` syscalls.c'den kaldırıldı (çift tanım çakışması önlendi) |
-| BUG #5 | E-STOP TX timeout çok uzundu | 50 ms'e indirildi |
 | BUG #6 | Klonlanmış F103'lerde PLL saat hatası | HSI 8 MHz, PLL kapalı (klon-güvenli) |
 | BUG #7 | USART1 9600 baud'da dashboard basımı 730ms sürüyor, 200ms timeout aşılıyor | 115200 baud'a çıkarıldı (~60ms'e indi) |
-| BUG #8 | Boot'ta ilk 200ms'de E-STOP butonu yok sayılıyordu | `last_button_press = (uint32_t)(-2000)` wraparound hilesi |
 | BUG #9 | `Parse_Int`'te son hane kontrolü eksik, signed long overflow UB riski | Son hane için ayrı taşma kontrolü eklendi |
 | FIX-E22 | M0/M1 pinleri floating kalıyor, modül mod belirsizliği → `rx_byte=0` | `Lora_Init()` içinde GPIO config + register okuma/yazma (read-before-write) |
-| FIX-A (Kritik) | E-STOP TX, devam eden IT-RX ile çakışıp telemetriyi donduruyordu | `Lora_SendCritical` — IT-RX güvenli durdur/yeniden başlat |
 | FIX-B | `_write()` çift tanım riski | syscalls.c'den kaldırıldı, yalnızca `__io_putchar` |
 | FIX-C | Her frame'de dashboard basımı RX'i bloklayıp veri kaybına yol açıyordu | `DASH_EVERY_N=3` ile throttle |
-| FIX-D (deadlock önleme) | UART timeout + yüksek öncelikli kesme deadlock riski | NVIC hiyerarşisi: SysTick(0) > EXTI0(1) > USART2(2) |
 | v3 (ISR yükü) | Decode_Line ISR içinde ~1ms sürebiliyor, 9600 baud byte penceresiyle (~1.04ms) çakışıp Overrun riski | Parse main context'e taşındı, ISR sadece ring'e yazar |
 | v4 (frame kuyruğu) | Çift tampon tasarımında aynı turda 2 satır gelirse ikincisi düşüyordu | SPSC `frame_q[4]` ile kayıp pratikte sıfırlandı |
+| 9.2.a | UKS -> AKS komut kanalı ve arac üstü acil durdurma girişinin donanım zinciri yönetmelikle çelişiyordu | Komut kanalı (0xA1-0xA4) ve donanım zinciri (GPIO/EXTI/NVIC/ISR) tamamen kaldırıldı; RF hattı tek yönlü telemetri + 0xB0 heartbeat'tir |
 
 ### Daha önce tespit edilen ve düzeltilen regresyon
 
@@ -312,18 +299,36 @@ main.c başlığında numaralandırılmış, halen geçerli düzeltmeler:
 
 ## 10. Test Durumu
 
-UKS-Telemetry'de **native unit test altyapısı yoktur** (AKS_Sim_ESP ve production AKS'in aksine — onlarda PlatformIO `env:native` + Unity ile zengin test kapsamı mevcut). Bunun başlıca nedeni STM32 HAL'e doğrudan bağımlılık (GPIO/UART register erişimi) — `telemetry.c` içindeki saf mantık (`Parse_Int`, `Tokenize`, `Decode_Line`, `Track_Sequence`) aslında donanımdan bağımsızdır ve teorik olarak izole edilip native test edilebilir, ancak şu an bu ayrım yapılmamış.
+UKS-Telemetry'de **native unit test altyapısı vardır**: `telemetry.c` STM32 HAL'e bağımlı değildir (yalnızca `stdint`/`stddef`/`stdio`/`string` kullanır — GPIO/UART register erişimi `lora.c`'de izole edilmiştir), bu yüzden hedef MCU'ya ihtiyaç olmadan doğrudan host `gcc` ile derlenip PC üzerinde çalıştırılabilir.
 
-**Olası gelecek iş:** `telemetry.c`'deki saf parse mantığını HAL bağımlılığından ayırıp (AKS tarafındaki `CanParse` modülü gibi) native test edilebilir hale getirmek — özellikle `Parse_Int` taşma sınırları, `Decode_Line` sanity-check aralıkları ve `Track_Sequence` gap/dup tespiti için.
+Test dosyası: `test/native/test_telemetry_v2.c` — `Parse_Int`/`Parse_U32` taşma sınırlarını, `Decode_Line` sanity-check aralıklarını, `Track_Sequence` gap/dup tespitini ve gerçek bir AKS golden-vektörünü kapsayan **55 kontrol**.
+
+**Çalıştırma:**
+
+```bash
+cd UKS-Telemetry
+make test-native
+```
+
+(`Makefile`'daki `test-native` hedefi, host `gcc` ile `test/native/test_telemetry_v2.c` + `Core/Src/telemetry.c`'yi derleyip çalıştırır — arm-none-eabi toolchain'e ihtiyaç duymaz.) Elle çalıştırmak için:
+
+```bash
+cd UKS-Telemetry/test/native
+gcc -std=c99 -Wall -Wextra -I../../Core/Inc \
+    test_telemetry_v2.c ../../Core/Src/telemetry.c \
+    -o test_telemetry_v2 && ./test_telemetry_v2
+```
+
+Beklenen çıktı: `55 checks, 0 failures`.
 
 ---
 
 ## 11. Bilinen Açık Konular
 
 - **M0/M1 donanım bağlantısı doğrulandı:** Ravza, M0/M1'in STM32'ye (PB6/PB7) bağlı olduğunu fiziksel olarak teyit etti; `main.h` ve kod tabanı bununla tutarlı.
-- **AKS tarafı asimetrisi:** UKS boot'ta E32'sini kendi kendine konfigüre eder (`Lora_Init`), ancak production AKS firmware'inde E32 için herhangi bir config yazımı **yoktur** — gerçek AKS modülünün o anki konfigürasyonu bilinmiyor ve UKS ile eşleşmemiş olabilir. Bu bilinen bir mimari boşluktur.
-- **E32 → E22 migrasyonu GERÇEKLEŞTİ:** Donanım E32-433T30D'den E22-400T30D-V2'ye (SX1268, 30 dBm) geçirildi; register-tabanlı `C0`/`C1` config protokolü, farklı config-modu pin seviyeleri (M0=0,M1=1) ve register haritası `Core/Inc/e22_regs.h`'de tek doğruluk kaynağı olarak tanımlı (bkz. §3). Karşı uçtaki AKS (ESP32) da eşzamanlı E22'ye geçiyor; register hedef değerleri iki tarafta birebir aynı olmalı. Register haritası henüz **V2 varsayımı** — bench dump ile teyit bekliyor (bkz. §3 doğrulama notu).
-- **VCU state alanı planlı, henüz yok:** AKS telemetri paketine VCU durumu eklenmesi planlanıyor — bu, protokol versiyon bump'ı ve UKS parser'ında koordineli güncelleme gerektirecek (15 alan kuralını bozmadan).
+- **AKS tarafı config-on-boot — ARTIK VAR:** Önceki bilinen boşluk ("production AKS firmware'inde config yazımı yoktur") güncelliğini yitirdi. AKS artık boot'ta kendi E22 modülünü konfigüre ediyor (`vTask_LoRa_UKS` boot sırası + `lib/E22Config`, ESP_AKS commit `0caa38b`). Kalan risk: UKS (`e22_regs.h`) ve AKS (`E22Config`) tarafındaki register hedef değerlerinin **birebir aynı** olduğu henüz çapraz doğrulanmadı — bkz. §3 doğrulama notu.
+- **E32 → E22 migrasyonu GERÇEKLEŞTİ (iki tarafta da):** Donanım E32-433T30D'den E22-400T30D-V2'ye (SX1268, 30 dBm) geçirildi; register-tabanlı `C0`/`C1` config protokolü, farklı config-modu pin seviyeleri (M0=0,M1=1) ve register haritası `Core/Inc/e22_regs.h`'de tek doğruluk kaynağı olarak tanımlı (bkz. §3). Karşı uçtaki AKS (ESP32) da E22'ye geçti (`lib/E22Config`). Register haritası UKS tarafında henüz **V2 varsayımı** — bench dump ile teyit bekliyor (bkz. §3 doğrulama notu).
+- **VCU state alanı planlı, henüz yok:** AKS telemetri paketine VCU durumu eklenmesi planlanıyor — bu, protokol versiyon bump'ı ve UKS parser'ında koordineli güncelleme gerektirecek (19 alan kuralını bozmadan).
 
 ---
 

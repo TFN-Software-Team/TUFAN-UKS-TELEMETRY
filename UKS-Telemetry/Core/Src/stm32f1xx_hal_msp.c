@@ -143,7 +143,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
     /* USART2 interrupt Init */
     /* USER CODE BEGIN USART2_MspInit 1 */
     /* NVIC onceligi ve kesme etkinlestirmenin tek-kaynagi burasi.
-     * Hedef hiyerarsi: SysTick(0) > EXTI0(1) > USART2(2). */
+     * Hedef hiyerarsi: SysTick(0) > USART2(2). */
     HAL_NVIC_SetPriority(USART2_IRQn, 2, 0);
     HAL_NVIC_EnableIRQ(USART2_IRQn);
     /* USER CODE END USART2_MspInit 1 */

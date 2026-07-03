@@ -23,9 +23,9 @@
 /* =========================================================================
  * Heartbeat (UKS -> AKS)
  *
- *  0xB0, komut kanalindan (0xA1-0xA4, telemetry.h) ayri, icerik tasimayan
- *  bir "canliyim" sinyalidir. Zamanlayici tetiklemelidir; operator girdisi
- *  GEREKTIRMEZ. Bkz. UYUM_NOTU.md bolum 2.
+ *  9.2.a: RF hatti tek yonlu telemetri + heartbeat'tir, komut kanali yok.
+ *  0xB0 icerik tasimayan bir "canliyim" sinyalidir. Zamanlayici
+ *  tetiklemelidir; operator girdisi GEREKTIRMEZ. Bkz. UYUM_NOTU.md bolum 2.
  * ========================================================================= */
 #define LORA_HEARTBEAT_BYTE       0xB0U
 #define LORA_HEARTBEAT_PERIOD_MS  1000U
@@ -84,13 +84,6 @@ LoraStatus_t Lora_StartReceive(LoraCtx_t *ctx);
  * @retval LORA_ERR_BUSY AUX 200 ms icinde HIGH gelmedi (modul mesgul)
  */
 LoraStatus_t Lora_Send        (LoraCtx_t *ctx, const uint8_t *data, uint16_t len);
-
-/**
- * @brief  KRITIK gonderim (E-STOP). AUX'u kisa bekler ama timeout olsa
- *         bile best-effort gonderir (FIX-5). IT-RX yine guvenli yonetilir.
- *         En kritik komutun AUX-busy yuzunden dusmesini onler.
- */
-LoraStatus_t Lora_SendCritical(LoraCtx_t *ctx, const uint8_t *data, uint16_t len);
 
 /** HAL_UART_RxCpltCallback icinden cagrilmali. */
 void Lora_OnUartRxCplt(LoraCtx_t *ctx, UART_HandleTypeDef *huart);

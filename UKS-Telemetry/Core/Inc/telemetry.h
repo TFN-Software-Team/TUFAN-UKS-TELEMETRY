@@ -1,6 +1,6 @@
 /**
  * @file    telemetry.h
- * @brief   AKS uyumlu ASCII CSV telemetri parser + tek-byte komut gondericisi.
+ * @brief   AKS uyumlu ASCII CSV telemetri parser.
  *
  *  AKS -> UKS Telemetri v2 (her satir bir frame, CRLF sonlu):
  *      "TEL,<ver>,<seq>,<rpm>,<torque>,<motorErr>,<motorValid>,<motorTimeout>,
@@ -30,11 +30,9 @@
  *      arada uretilmiyor. UKS bu sozlesmeye gore hazir; AKS tarafinin da
  *      ayni birlesimi yapmasi gerekir.
  *
- *  UKS -> AKS Komut (tek byte, framing/checksum YOK):
- *      0xA1 = EMERGENCY_STOP
- *      0xA2 = START
- *      0xA3 = STOP
- *      0xA4 = DRIVE_ENABLE
+ *  9.2.a: RF hatti tek yonlu telemetri + heartbeat'tir (bkz. lora.h). UKS ->
+ *  AKS komut kanali (eski 0xA1-0xA4) sistemden tamamen kaldirildi; acil
+ *  durdurma arac ustundeki fiziksel kontaktorle saglanir, RF'ten bagimsizdir.
  *
  *  Mimari (v3/v4 — ISR yuku azaltildi):
  *  - ISR (Telemetry_RxBytePush) artik SADECE ham byte'i dairesel tampona
@@ -47,7 +45,6 @@
  *    uretici, Telemetry_Parse tuketicidir. Tek main turunda birden cok
  *    frame gelse de kuyruk derinligi sayesinde kaybolmaz.
  *  - Sequence numarasi izlenir; gap/duplicate sayilari stats'a yazilir.
- *  - E-STOP UKS'te lokal latch'lenir (AKS bu komutu UKS'e yansitmaz).
  */
 
 #ifndef TELEMETRY_H
@@ -79,17 +76,6 @@
  * pratikte 1 frame bile birikmiyor; 4 rahat marj birakir. */
 #define TEL_FRAME_Q_DEPTH       4U
 #define TEL_FRAME_Q_MASK        (TEL_FRAME_Q_DEPTH - 1U)
-
-/* UKS -> AKS komut byte'lari (UKS_LoRa_Protocol.md ile birebir) */
-#define UKS_CMD_EMERGENCY_STOP  0xA1U
-#define UKS_CMD_START           0xA2U
-#define UKS_CMD_STOP            0xA3U
-#define UKS_CMD_DRIVE_ENABLE    0xA4U
-
-/* E-STOP burst — paket kaybina karsi N kez ardisik gonderilir.
- * AKS taraf tek-byte bekledigi icin ardisik 3x 0xA1 da herhangi bir
- * RX okumasinda E-STOP olarak yorumlanir. */
-#define TEL_ESTOP_BURST_COUNT   3U
 
 /* Sanity araliklari (parser'da hard reject) */
 #define TEL_RPM_MAX             20000
@@ -158,11 +144,7 @@ typedef struct {
     uint32_t good_packets;
     uint32_t seq_gaps;         /* Beklenenin uzerinde atlama */
     uint32_t seq_dup_or_stale; /* Ayni veya geri giden sira */
-    uint32_t estop_tx_count;   /* Operatorun tetikledigi E-STOP burst sayisi */
 } TelStats_t;
-
-/** UKS lokal E-STOP callback'i. ISR'dan da cagrilabilir; KISA TUTUN. */
-typedef void (*TelEStopCb_t)(void *user);
 
 typedef struct {
     /* ---- RX ring buffer (ISR write, main read) ----
@@ -189,23 +171,9 @@ typedef struct {
     uint32_t  last_sequence;
     uint8_t   have_last_seq;
 
-    /* UKS lokal E-STOP durumu (operator butona basinca latchlenir) */
-    volatile uint8_t estop_active;
-    TelEStopCb_t     estop_cb;
-    void            *estop_cb_user;
-
     TelStats_t stats;
     uint32_t   last_rx_ms;       /* son byte'in ana donguda islenme zamani */
 } TelCtx_t;
-
-/* ========== Encoder (UKS -> AKS) ========== */
-
-/** Tek byte komut yazar. AKS framing/CRC beklemiyor. */
-uint8_t Telemetry_EncodeCommand(uint8_t cmd_byte,
-                                uint8_t *out_buf, size_t max_len);
-
-/** N x 0xA1 burst yazar. Donus: yazilan byte sayisi (=N). */
-uint8_t Telemetry_EncodeEStopBurst(uint8_t *out_buf, size_t max_len);
 
 /* ========== Decoder (AKS -> UKS) ========== */
 
@@ -228,18 +196,6 @@ TelStatus_t Telemetry_Parse       (TelCtx_t *ctx, TelData_t *out);
 /** Yarim satir varsa timeout ile iptal eder. Periyodik cagir. */
 void        Telemetry_Tick        (TelCtx_t *ctx, uint32_t now_ms);
 
-/* ========== UKS Lokal E-STOP ========== */
-
-uint8_t     Telemetry_IsEStopActive (const TelCtx_t *ctx);
-void        Telemetry_ClearEStop    (TelCtx_t *ctx);
-
-/** Operator butona bastiginda cagrilir. Idempotent; yalnizca ilk
- *  cagrida callback tetiklenir. ISR-safe. */
-void        Telemetry_SetEStopActive(TelCtx_t *ctx);
-
-void        Telemetry_SetEStopCallback(TelCtx_t *ctx,
-                                       TelEStopCb_t cb, void *user);
-
 /* ========== Istatistik & Ekran ========== */
 
 const TelStats_t *Telemetry_GetStats  (const TelCtx_t *ctx);
@@ -247,7 +203,6 @@ void              Telemetry_ResetStats(TelCtx_t *ctx);
 
 void              Telemetry_PrintDashboard(const TelData_t *data,
                                            TelStatus_t status,
-                                           uint8_t estop_active,
                                            uint8_t link_down);
 void              Telemetry_PrintStats    (const TelCtx_t *ctx);
 

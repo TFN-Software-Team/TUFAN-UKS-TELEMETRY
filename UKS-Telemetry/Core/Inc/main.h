@@ -6,13 +6,15 @@
   * UKS - Uzaktan Kontrol Sistemi pin tanimlari
   *
   * Pin haritasi (STM32F103):
-  * PA0         -> AC_L_STOP    (Acil stop butonu, EXTI falling, pull-up)
   * PA2 / PA3   -> USART2 TX/RX -> LoRa E22-400T30D-V2 modulu (9600 baud)
   * PA9 / PA10  -> USART1 TX/RX -> Ekran / Seri monitor      (115200 baud)
   * PB6         -> E22_M0       (Normal mod = LOW, Config mod = LOW)
   * PB7         -> E22_M1       (Normal mod = LOW, Config mod = HIGH)
   * PB10        -> LORA_AUX     (E22 busy/ready — HIGH=hazir, input pull-up)
-  * PB11        -> MOTOR_EN     (Durum cikisi: HIGH=nominal, LOW=E-STOP)
+  *
+  * 9.2.a: eski PA0 ve PB11 pin atamalari (uzaktan durdurma donanimi)
+  * kaldirildi — acil durdurma arac ustundeki fiziksel kontaktorle
+  * saglanir, RF/UKS'ten bagimsizdir.
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -31,10 +33,6 @@ void Error_Handler(void);
 /* --------------------------------------------------------------------------
  * USART pin tanimlari
  * -------------------------------------------------------------------------- */
-#define AC_L_STOP_Pin           GPIO_PIN_0
-#define AC_L_STOP_GPIO_Port     GPIOA
-#define AC_L_STOP_EXTI_IRQn     EXTI0_IRQn
-
 #define LORA_TX_Pin             GPIO_PIN_2
 #define LORA_TX_GPIO_Port       GPIOA
 
@@ -76,10 +74,6 @@ void Error_Handler(void);
 /* E22 AUX: HIGH = hazir, LOW = mesgul/boot. Input + pull-up. */
 #define LORA_AUX_Pin            GPIO_PIN_10
 #define LORA_AUX_GPIO_Port      GPIOB
-
-/* Durum cikisi: HIGH = nominal, LOW = E-STOP aktif */
-#define MOTOR_EN_Pin            GPIO_PIN_11
-#define MOTOR_EN_GPIO_Port      GPIOB
 
 /* USER CODE END Private defines */
 

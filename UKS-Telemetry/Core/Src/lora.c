@@ -19,17 +19,21 @@
  *
  *  TX/RX veri duzlemi (transparan mod, IT-RX mimarisi, rx_active
  *  watchdog) E32 ile birebir AYNI kaldi — bu katman (Lora_Send,
- *  Lora_SendCritical, Lora_StartReceive, Lora_OnUartRxCplt/Error)
- *  DEGISMEDI, yalnizca isim/yorumlar E22'ye guncellendi.
+ *  Lora_StartReceive, Lora_OnUartRxCplt/Error) DEGISMEDI, yalnizca
+ *  isim/yorumlar E22'ye guncellendi.
  *
  *  Korunan E32-donemi duzeltmeleri (davranis olarak hala gecerli):
  *  FIX-4 (KRITIK): Half-duplex TX/RX cakismasi. USART2 uzerinde
  *         HAL_UART_Receive_IT ile byte-byte RX surerken dogrudan
  *         HAL_UART_Transmit cagrilirsa HAL __HAL_LOCK yuzunden TX
  *         HAL_BUSY donebilir ya da devam eden RX bozulur. Cozum:
- *         Lora_Send/Lora_SendCritical icinde TX oncesi IT-RX abort,
- *         TX, ardindan IT-RX yeniden arm. rx_active bayragi ile takip.
- *  FIX-5: E-STOP best-effort gonderim (Lora_SendCritical) — AUX bloklamaz.
+ *         Lora_Send icinde TX oncesi IT-RX abort, TX, ardindan IT-RX
+ *         yeniden arm. rx_active bayragi ile takip.
+ *
+ *  9.2.a: UKS -> AKS komut kanali (eski Lora_SendCritical, acil durdurma
+ *  komutu gonderimi icin kullanilirdi) sistemden tamamen kaldirildi. UKS ->
+ *  AKS yonunde yalnizca 0xB0 heartbeat'i (Lora_Send ile, best-effort)
+ *  gonderilir.
  */
 
 #include "lora.h"
@@ -473,11 +477,6 @@ static LoraStatus_t Lora_TxSafe(LoraCtx_t *ctx, const uint8_t *data,
 LoraStatus_t Lora_Send(LoraCtx_t *ctx, const uint8_t *data, uint16_t len)
 {
     return Lora_TxSafe(ctx, data, len, /*block_aux=*/1U, /*tx_to=*/1000U);
-}
-
-LoraStatus_t Lora_SendCritical(LoraCtx_t *ctx, const uint8_t *data, uint16_t len)
-{
-    return Lora_TxSafe(ctx, data, len, /*block_aux=*/0U, /*tx_to=*/100U);
 }
 
 void Lora_OnUartRxCplt(LoraCtx_t *ctx, UART_HandleTypeDef *huart)

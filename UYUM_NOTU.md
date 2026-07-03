@@ -20,28 +20,12 @@ UKS'e gönderir; UKS bunu ayrıştırıp PC'ye (izleme merkezi) iletir. Bu kanal
 **Yönetmelik madde 9.2 yalnızca bu kanalı kapsar.** Tek-yönlülük kuralı
 (9.2.a) burada uygulanır.
 
-### (b) Uzaktan Kontrol Kanalı — UKS → AKS, tek-byte komutlar
+### (b) Uzaktan Kontrol Kanalı — KALDIRILDI (9.2.a)
 
-UKS, operatör girdisiyle AKS'e tek-byte komutlar gönderir
-(`telemetry.h:58-62`):
-
-| Byte | Sabit | Anlam |
-|------|-------|-------|
-| `0xA1` | `UKS_CMD_EMERGENCY_STOP` | Acil durdurma |
-| `0xA2` | `UKS_CMD_START` | Başlat |
-| `0xA3` | `UKS_CMD_STOP` | Durdur |
-| `0xA4` | `UKS_CMD_DRIVE_ENABLE` | Sürüş izni |
-
-Bu, **UKS'in (Uzaktan Kontrol Sistemi) asıl işlevidir** — adından da
-anlaşılacağı gibi sistemin var oluş amacı budur. Bu kanal, telemetri
-kanalının tek-yönlülük kuralının (9.2.a) **kapsamında değildir**; zira
-9.2.a telemetri veri akışını düzenler, ayrı bir işlev olan uzaktan kontrolü
-değil.
-
-Not: E-STOP komutu güvenilirlik için 3 kez art arda gönderilir
-(`TEL_ESTOP_BURST_COUNT`) ve ayrıca UKS tarafında lokal olarak latch'lenir
-(operatör butonuna basılınca); AKS bu lokal latch durumunu UKS'e geri
-yansıtmaz.
+Komut kanalı ve UKS E-STOP butonu 9.2.a uyumu için sistemden tamamen
+kaldırıldı (2026-07-03). RF hattı tek yönlü telemetri + 0xB0 stabilizasyon
+teyididir. Acil durdurma araç üstü fiziksel kontaktörledir, RF'ten
+bağımsızdır.
 
 ## 2. İzin Verilen Geri Bildirim — Heartbeat (0xB0)
 
@@ -86,17 +70,12 @@ danışmana/jüriye teyit ettirilmelidir.
   laptop veya telefon araç İÇİNDE yer almaz — bunlar yer istasyonu
   ekipmanıdır.
 
-## 4. AÇIK SORU — Danışmana Teyit Ettirilecek
+## 4. AÇIK SORU — ÇÖZÜLDÜ
 
-> **Doğrulanacak:** Uzaktan Kontrol Kanalı'nın (bkz. madde 1.b), Yönetmelik
-> 9.2'den ayrı, kendi başına bir **"Uzaktan Kontrol Sistemi"** maddesine
-> tabi olup olmadığı danışmana (teknik kontrol/jüri) teyit ettirilmelidir.
->
-> Bu doküman, 9.2.a'nın yalnızca telemetri kanalını kapsadığı varsayımıyla
-> hazırlanmıştır; komut kanalının ayrı bir yönetmelik maddesi altında ek
-> kurallara (örn. ayrı frekans, ayrı yetkilendirme, gecikme limiti vb.) tabi
-> olup olmadığı bu dokümanın kapsamı dışındadır ve **doğrulanmadan** teknik
-> kontrole girilmemelidir.
+Komut kanalı ve UKS E-STOP butonu 9.2.a uyumu için sistemden tamamen
+kaldırıldı (2026-07-03). RF hattı tek yönlü telemetri + 0xB0 stabilizasyon
+teyididir. Acil durdurma araç üstü fiziksel kontaktörledir, RF'ten
+bağımsızdır.
 
 ## 5. Sayım Konvansiyonu — `TEL_FIELD_COUNT`
 

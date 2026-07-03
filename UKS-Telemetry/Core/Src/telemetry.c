@@ -363,24 +363,6 @@ static void Process_Byte(TelCtx_t *ctx, uint8_t b, uint32_t now_ms)
     }
 }
 
-/* ========== Encoder ========== */
-
-uint8_t Telemetry_EncodeCommand(uint8_t cmd_byte,
-                                uint8_t *out_buf, size_t max_len)
-{
-    if (!out_buf || max_len < 1U) return 0U;
-    out_buf[0] = cmd_byte;
-    return 1U;
-}
-
-uint8_t Telemetry_EncodeEStopBurst(uint8_t *out_buf, size_t max_len)
-{
-    if (!out_buf || max_len < TEL_ESTOP_BURST_COUNT) return 0U;
-    for (uint8_t i = 0; i < TEL_ESTOP_BURST_COUNT; i++)
-        out_buf[i] = UKS_CMD_EMERGENCY_STOP;
-    return TEL_ESTOP_BURST_COUNT;
-}
-
 /* ========== Decoder API ========== */
 
 void Telemetry_Init(TelCtx_t *ctx)
@@ -490,35 +472,6 @@ void Telemetry_Tick(TelCtx_t *ctx, uint32_t now_ms)
     }
 }
 
-/* ========== UKS Lokal E-STOP ========== */
-
-uint8_t Telemetry_IsEStopActive(const TelCtx_t *ctx)
-{
-    return ctx ? ctx->estop_active : 0U;
-}
-
-void Telemetry_ClearEStop(TelCtx_t *ctx)
-{
-    if (ctx) ctx->estop_active = 0U;
-}
-
-void Telemetry_SetEStopActive(TelCtx_t *ctx)
-{
-    if (!ctx) return;
-    if (!ctx->estop_active)
-    {
-        ctx->estop_active = 1U;
-        if (ctx->estop_cb) ctx->estop_cb(ctx->estop_cb_user);
-    }
-}
-
-void Telemetry_SetEStopCallback(TelCtx_t *ctx, TelEStopCb_t cb, void *user)
-{
-    if (!ctx) return;
-    ctx->estop_cb      = cb;
-    ctx->estop_cb_user = user;
-}
-
 /* ========== Stats ========== */
 
 const TelStats_t *Telemetry_GetStats(const TelCtx_t *ctx)
@@ -568,20 +521,13 @@ static const char *SysState_Str(uint8_t st)
 }
 
 void Telemetry_PrintDashboard(const TelData_t *d, TelStatus_t status,
-                              uint8_t estop_active, uint8_t link_down)
+                              uint8_t link_down)
 {
     printf("\r\n");
     printf("  +============================================+\r\n");
     printf("  |        UKS YER ISTASYONU TELEMETRI         |\r\n");
     printf("  +============================================+\r\n");
     printf("  |  LINK: %-36s|\r\n", link_down ? "DOWN" : "OK");
-
-    if (estop_active)
-    {
-        printf("  |  *** !!! ACIL DURDURMA AKTIF !!! ***       |\r\n");
-        printf("  |  Motor devre disi - manuel reset gerek    |\r\n");
-        printf("  |--------------------------------------------|\r\n");
-    }
 
     if (status == TEL_NO_DATA || !d)
     {
@@ -599,8 +545,7 @@ void Telemetry_PrintDashboard(const TelData_t *d, TelStatus_t status,
            (unsigned)(d->speed_kmh_x10 % 10U));
     printf("  |--- Motor ----------------------------------|\r\n");
     printf("  |   RPM    : %5u    Torque : %6d         |\r\n",
-           estop_active ? 0U : (unsigned)d->motor_rpm,
-           (int)d->motor_torque);
+           (unsigned)d->motor_rpm, (int)d->motor_torque);
     printf("  |   Errs   : 0x%02X     Valid  : %u  Tout: %u  |\r\n",
            (unsigned)d->motor_error_flags,
            (unsigned)d->motor_data_valid,
@@ -656,7 +601,5 @@ void Telemetry_PrintStats(const TelCtx_t *ctx)
     printf("  Gecerli pkt     : %lu\r\n", (unsigned long)s->good_packets);
     printf("  Seq gap         : %lu\r\n", (unsigned long)s->seq_gaps);
     printf("  Seq dup/stale   : %lu\r\n", (unsigned long)s->seq_dup_or_stale);
-    printf("  E-STOP TX (UKS) : %lu\r\n", (unsigned long)s->estop_tx_count);
-    printf("  E-STOP aktif    : %s\r\n",  ctx->estop_active ? "EVET" : "hayir");
     printf("  ---------------------\r\n\r\n");
 }

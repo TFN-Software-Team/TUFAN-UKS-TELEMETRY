@@ -20,12 +20,11 @@
   *           komutlarina degisti (bkz. Core/Inc/e22_regs.h, Core/Src/lora.c).
   *
   *  YENI DUZELTMELER:
-  *  FIX-A (KRITIK): E-STOP artik Lora_SendCritical ile gonderiliyor.
-  *           Eski kod dogrudan HAL_UART_Transmit cagiriyordu; bu, devam
-  *           eden IT-tabanli RX ile cakisip telemetri akisini donduruyor
-  *           ve AUX-busy durumunda E-STOP dusebiliyordu. Yeni yol IT-RX'i
-  *           guvenli durdurup TX yapar, sonra RX'i yeniden baslatir;
-  *           AUX bloklamaz. Gonderim basarisizsa tekrar denenir.
+  *  9.2.a  : UKS -> AKS komut kanali (eski 0xA1-0xA4) ve arac ustu acil
+  *           durdurma girisinin donanim zinciri sistemden tamamen
+  *           kaldirildi — RF hatti tek yonlu telemetri + 0xB0
+  *           heartbeat'tir. Acil durdurma arac ustundeki fiziksel
+  *           kontaktorle saglanir, RF'ten bagimsizdir.
   *  FIX-B : printf PicoLibc uzerinden calisir (starm_putc -> __io_putchar).
   *           _write main.c'de strong tanimli; syscalls.c'deki
   *           __strong_reference(_write, write) icin gerekli, KALDIRILAMAZ.
@@ -53,22 +52,13 @@ static LoraCtx_t   lora_ctx;
 static uint32_t         last_heartbeat_ms = 0;
 
 /* Heartbeat TX (0xB0) — UYUM_NOTU.md bolum 2: madde 9.2.a'nin izin verdigi
- * stabilizasyon-teyidi geri bildirimi, komut kanalindan (0xA1-0xA4) bagimsiz. */
+ * stabilizasyon-teyidi geri bildirimi. RF hattindaki TEK TX kaynagidir. */
 static uint32_t         last_heartbeat_tx_ms = 0;
 
 /* Link-down tespiti: son gecerli TEL frame'inin alindigi tick.
  * 0 = henuz hic gecerli frame alinmadi (boot durumu, timeout tetiklemez). */
 static uint32_t         last_valid_tel_tick = 0;
 static uint8_t          link_down = 0;
-
-/*
- * BUG #8 DUZELTME: Boot'ta E-STOP kilitlenmesi.
- * 0 ile baslatilinca ilk 200 ms'de buton yok sayiliyordu.
- * (uint32_t)(-2000) → wraparound ile now=0'da fark=2000 > 200 → gecilir.
- */
-static volatile uint32_t last_button_press = (uint32_t)(-2000);
-
-static volatile uint8_t estop_tx_pending  = 0;
 
 /* FIX-C: dashboard throttle — her DASH_EVERY_N frame'de bir bas */
 #define DASH_EVERY_N   3U
@@ -129,78 +119,6 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 }
 
 /* ====================================================================
- * E-STOP butonu (PA0, falling edge, pull-up)
- * ==================================================================== */
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
-{
-    if (GPIO_Pin != AC_L_STOP_Pin) return;
-
-    uint32_t now = HAL_GetTick();
-    if ((now - last_button_press) <= 200U) return;   /* debounce */
-    last_button_press = now;
-
-    HAL_GPIO_WritePin(MOTOR_EN_GPIO_Port, MOTOR_EN_Pin, GPIO_PIN_RESET);
-    Telemetry_SetEStopActive(&tel_ctx);
-    estop_tx_pending = 1U;
-}
-
-/* ====================================================================
- * FIX-A DUZELTME: E-STOP TX — Lora_SendCritical ile.
- * IT-RX guvenli durdurulur/yeniden baslatilir, AUX bloklamaz.
- *
- * FIX-D2 (retry throttle): Gonderim basarisizsa pending tekrar set edilir
- * AMA en az ESTOP_RETRY_MS gecmeden tekrar DENENMEZ. Aksi halde modul AUX'u
- * surekli LOW'da takiliysa (elektriksel ariza/RF parazit) ana dongu her
- * turda Lora_SendCritical'in 50 ms AUX beklemesine girer; while(1) saniyede
- * 6-7 kez doner, Telemetry_Process ac kalir ve printf hatti spam'lenir.
- * Throttle ile retry'lar seyreltilir, telemetri akisi korunur. E-STOP'un
- * ILK denemesi gecikmesizdir; yalnizca BASARISIZ tekrarlar throttle'lanir.
- * ==================================================================== */
-#define ESTOP_RETRY_MS  100U
-
-static void process_estop_tx(void)
-{
-    /* Wraparound init: boot'ta (uint32_t)(-ESTOP_RETRY_MS) ile basla ki
-     * now=0..100 araliginda gelen ILK E-STOP bile throttle'a takilmadan
-     * aninda gonderilsin. (last_button_press ile ayni desen.) */
-    static uint32_t last_retry_ms = (uint32_t)(0U - ESTOP_RETRY_MS);
-
-    __disable_irq();
-    uint8_t pending = estop_tx_pending;
-    estop_tx_pending = 0U;
-    __enable_irq();
-    if (!pending) return;
-
-    /* Onceki deneme basarisiz olduysa, art arda spam'i onlemek icin bekle.
-     * (last_retry_ms yalnizca basarisizlikta guncellenir; ilk denemede
-     *  fark zaten buyuk oldugu icin gecikme yasanmaz.) */
-    uint32_t now = HAL_GetTick();
-    if ((now - last_retry_ms) < ESTOP_RETRY_MS)
-    {
-        estop_tx_pending = 1U;
-        return;
-    }
-
-    uint8_t buf[TEL_ESTOP_BURST_COUNT];
-    uint8_t n = Telemetry_EncodeEStopBurst(buf, sizeof(buf));
-
-    LoraStatus_t ls = Lora_SendCritical(&lora_ctx, buf, n);
-    if (ls == LORA_OK)
-    {
-        tel_ctx.stats.estop_tx_count++;
-        printf("\r\n!!! E-STOP -> AKS (0xA1 x%u) gonderildi !!!\r\n\r\n",
-               (unsigned)n);
-    }
-    else
-    {
-        estop_tx_pending = 1U;   /* kritik: tekrar dene (throttle'li) */
-        last_retry_ms    = now;  /* basarisizlik anini kaydet */
-        printf("\r\n!! E-STOP TX hatasi (ls=%d) — %lu ms sonra tekrar !!\r\n\r\n",
-               (int)ls, (unsigned long)ESTOP_RETRY_MS);
-    }
-}
-
-/* ====================================================================
  * main
  * ==================================================================== */
 int main(void)
@@ -217,6 +135,7 @@ int main(void)
     printf("\r\n>>> UKS YER ISTASYONU BASLATILIYOR <<<\r\n");
     printf("    Protokol  : ASCII CSV v%u, %u alan, AKS uyumlu\r\n",
            (unsigned)TEL_PROTOCOL_VERSION, (unsigned)TEL_FIELD_COUNT);
+    printf("    RF hatti tek yonlu (9.2.a): TX yalnizca heartbeat\r\n");
     printf("    Saat      : HSI 8 MHz (PLL yok)\r\n");
     printf("    Monitor   : USART1 115200 baud\r\n");
     printf("    LoRa UART : USART2 9600 baud\r\n");
@@ -278,14 +197,9 @@ int main(void)
     {
         uint32_t now = HAL_GetTick();
 
-        /* E-STOP gonderimi (ISR'dan set edilen flag) */
-        process_estop_tx();
-
         /* Heartbeat TX (0xB0): AKS'e periyodik "canliyim" sinyali.
-         * Best-effort — E-STOP gibi kritik degil, basarisizsa sessizce
-         * atlanir ve bir sonraki periyotta tekrar denenir. Lora_Send
-         * (Lora_SendCritical degil) kullanilir: E-STOP'un AUX-busy
-         * onceligini heartbeat calmaz. */
+         * Best-effort — basarisizsa sessizce atlanir ve bir sonraki
+         * periyotta tekrar denenir. */
         if ((now - last_heartbeat_tx_ms) >= LORA_HEARTBEAT_PERIOD_MS)
         {
             last_heartbeat_tx_ms = now;
@@ -377,9 +291,7 @@ int main(void)
             /* FIX-C: dashboard ciktisini seyrelt — RX'e nefes alani */
             if ((++dash_frame_counter % DASH_EVERY_N) == 0U)
             {
-                Telemetry_PrintDashboard(&d, st,
-                                         Telemetry_IsEStopActive(&tel_ctx),
-                                         link_down);
+                Telemetry_PrintDashboard(&d, st, link_down);
             }
         }
     }
@@ -429,57 +341,13 @@ static void MX_USART2_UART_Init(void)
  * ==================================================================== */
 static void MX_GPIO_Init(void)
 {
-    GPIO_InitTypeDef g = {0};
-
     __HAL_RCC_GPIOA_CLK_ENABLE();
     __HAL_RCC_GPIOB_CLK_ENABLE();
 
-    /* PA0 — E-STOP butonu: falling edge + pull-up */
-    g.Pin  = AC_L_STOP_Pin;
-    g.Mode = GPIO_MODE_IT_FALLING;
-    g.Pull = GPIO_PULLUP;
-    HAL_GPIO_Init(AC_L_STOP_GPIO_Port, &g);
-
-    /* PB11 — MOTOR_EN cikisi.
-     * STM32 glitch-free baslatma standardi: ONCE WritePin (ODR latch'le),
-     * SONRA HAL_GPIO_Init (output moda gec).
-     *
-     * Nedeni: Boot'ta pin floating input, ODR=0. Eger once Init yapilirsa
-     * pin aninda 0V surer (~200ns LOW glitch), SONRA WritePin HIGH yapar.
-     * Motor surucunun E-STOP devresi bu kisa LOW'u okursa arac boot'ta
-     * yanlis E-STOP'a girer. Dogru sira: once WritePin ile ODR'ye HIGH
-     * yaz (pin hala floating, fiziksel hatta etki yok), sonra Init ile
-     * output moduna gec — pin o an hazirda bekleyen HIGH degerini surer,
-     * glitch olmaz. CubeMX'in urettigi tum GPIO kodlari bu siraya uyar. */
-    HAL_GPIO_WritePin(MOTOR_EN_GPIO_Port, MOTOR_EN_Pin, GPIO_PIN_SET);
-    g.Pin   = MOTOR_EN_Pin;
-    g.Mode  = GPIO_MODE_OUTPUT_PP;
-    g.Pull  = GPIO_NOPULL;
-    g.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(MOTOR_EN_GPIO_Port, &g);
-
-    /* ====================================================================
-     * FIX-D (DEADLOCK ONLEME): Kesme oncelikleri.
-     *
-     * HAL_UART_Transmit/Receive timeout olcumu icin HAL_GetTick() kullanir;
-     * bu sayaci SysTick kesmesi artirir. Eger bir UART islemi, SysTick'ten
-     * YUKSEK oncelikli bir kesme (orn. EXTI0) icinde kilitlenirse SysTick
-     * araya giremez, tick artmaz, timeout asla dolmaz → deadlock.
-     *
-     * Bu kodda E-STOP ISR'i Transmit cagirmiyor (sadece bayrak set ediyor),
-     * yani deadlock zaten olusmaz. Yine de kusak+aski: SysTick en yuksekte
-     * (0) kalir, EXTI0=1, USART2=2. Boylece SysTick her zaman ilerler.
-     * ==================================================================== */
-    HAL_NVIC_SetPriority(SysTick_IRQn, 0, 0);   /* tick her zaman ilerlesin */
-
-    /* EXTI0 (E-STOP) — SysTick'ten dusuk ama USART'tan yuksek */
-    HAL_NVIC_SetPriority(EXTI0_IRQn, 1, 0);
-    HAL_NVIC_EnableIRQ(EXTI0_IRQn);
-
-    /* USART2 NVIC onceligi/enable'i HAL_UART_MspInit icinde ayarlanir.
-     * MspInit, MX_GPIO_Init'ten SONRA (UART init sirasinda) calistigi icin
-     * burada set edilen deger eziliyordu; tek-kaynak orasi olsun diye bu
-     * blok kaldirildi. Hedef hiyerarsi: SysTick(0) > EXTI0(1) > USART2(2). */
+    /* Kesme oncelikleri: SysTick en yuksekte (0) kalir ki HAL_GetTick()
+     * tabanli timeout'lar (ornegin UART TX/RX) her zaman ilerlesin.
+     * USART2 NVIC onceligi/enable'i HAL_UART_MspInit icinde ayarlanir. */
+    HAL_NVIC_SetPriority(SysTick_IRQn, 0, 0);
 }
 
 /* ====================================================================
