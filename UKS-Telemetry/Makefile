@@ -188,7 +188,22 @@ $(BUILD_DIR):
 #######################################
 clean:
 	-rm -fR $(BUILD_DIR)
-  
+
+#######################################
+# native unit tests (host gcc — telemetry.c HAL'a bagimli degil)
+#######################################
+NATIVE_CC       = gcc
+NATIVE_TEST_DIR = test/native
+NATIVE_TEST_BIN = $(NATIVE_TEST_DIR)/test_telemetry_v2
+
+test-native:
+	$(NATIVE_CC) -std=c99 -Wall -Wextra -ICore/Inc \
+		$(NATIVE_TEST_DIR)/test_telemetry_v2.c Core/Src/telemetry.c \
+		-o $(NATIVE_TEST_BIN)
+	./$(NATIVE_TEST_BIN)
+
+.PHONY: all clean test-native
+
 #######################################
 # dependencies
 #######################################
