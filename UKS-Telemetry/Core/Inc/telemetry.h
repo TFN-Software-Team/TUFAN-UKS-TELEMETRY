@@ -72,8 +72,10 @@
 #define TEL_RX_RING_MASK        (TEL_RX_RING_SIZE - 1U)
 
 /* Decode edilmis frame kuyrugu derinligi. 2'nin kuvveti olmali (maske ile
- * sarma). Air-rate ~450 ms/frame, en kotu bloklama (dashboard) ~60 ms →
- * pratikte 1 frame bile birikmiyor; 4 rahat marj birakir. */
+ * sarma). AKS tarafi link flapping duzeltmesiyle 5 Hz'den 2 Hz'e indi
+ * (LORA_TX_PERIOD_MS=500, bkz. AKS SystemConfig.h); nominal frame araligi
+ * ~500 ms, en kotu bloklama (dashboard) ~60 ms → pratikte 1 frame bile
+ * birikmiyor; 4 rahat marj birakir. */
 #define TEL_FRAME_Q_DEPTH       4U
 #define TEL_FRAME_Q_MASK        (TEL_FRAME_Q_DEPTH - 1U)
 
@@ -81,7 +83,10 @@
 #define TEL_RPM_MAX             20000
 
 /* Link-down esigi: bu suredir gecerli TEL frame'i gelmediyse baglanti
- * kopmus sayilir (bkz. main.c link_down state, UYUM_NOTU.md bolum 2). */
+ * kopmus sayilir (bkz. main.c link_down state, UYUM_NOTU.md bolum 2).
+ * AKS tarafi link flapping duzeltmesiyle 2 Hz'e indi (LORA_TX_PERIOD_MS=500);
+ * nominal frame araligi ~500 ms, bu deger hala 4x marj birakiyor —
+ * DEGISTIRILMEDI. */
 #define TEL_LINK_TIMEOUT_MS     2000U
 
 /* ========== Tipler ========== */
