@@ -14,6 +14,10 @@ Release/
 build/
 Build/
 
+# Native unit test binaries (test/native, host gcc ile derlenir)
+**/test/native/*.exe
+**/test/native/test_telemetry_v2
+
 # STM32CubeIDE / Eclipse
 .cproject
 .project
