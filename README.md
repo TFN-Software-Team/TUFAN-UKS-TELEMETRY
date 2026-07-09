@@ -345,3 +345,7 @@ make -f STM32Make.make   # build/debug/ dizinine derler (STM32 for VSCode)
 `Makefile` CubeMX'in `projectgenerator` aracıyla `.ioc`'tan üretilir; `STM32Make.make` ise STM32 for VSCode eklentisi tarafından üretilir ve Core/Src'yi kendi başına tarayarak günceller. `Core/Src`'ye yeni bir `.c` dosyası eklendiğinde CubeMX regenerate edilmezse `Makefile`'ın `C_SOURCES` listesi eskir (nitekim `lora.c`/`telemetry.c` bir süre yalnızca `STM32Make.make`'te vardı, `Makefile` ile link hatası veriyordu — düzeltildi). Bu drift'i erken yakalamak için `make check-sources` (ve `make test-native` üzerinden otomatik) `Core/Src/*.c` ile `Makefile`'ın `C_SOURCES` listesini karşılaştırır.
 
 Flash için ST-Link veya benzeri bir programlayıcı gerekir (proje dosyalarında otomatik flash script'i bulunmuyor — manuel `st-flash` veya STM32CubeProgrammer kullanılmalı; `STM32Make.make`'in `flash`/`erase` hedefleri `openocd` gerektirir).
+
+### Resmi build yolu
+
+Araca/sahaya flash'lanacak firmware **yalnızca `make`** (kanonik yol, CubeMX'in ürettiği `Makefile`) ile derlenir. `STM32Make.make` sadece IDE içi geliştirme/debug amaçlıdır — çıktısı araca flash'lanmaz. Gerekçe: iki dosya farklı `arm-none-eabi-gcc` sürümü kullanıyor (`Makefile` → sistem toolchain'i 10.3.1, `STM32Make.make` → eklentinin kendi 15.2.1'i), aynı kaynak seti derlense de farklı derleyici sürümü farklı binary üretir.
