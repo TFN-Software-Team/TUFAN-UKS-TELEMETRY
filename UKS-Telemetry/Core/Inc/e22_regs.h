@@ -90,8 +90,19 @@
  *   istenirse ayri, koordineli bir is olarak yapilir. */
 #define E22_VAL_REG3        0x00U
 
-#define E22_VAL_CRYPT_H     0x00U   /* yazilir ama GERI OKUNAMAZ (bkz. yukari) */
-#define E22_VAL_CRYPT_L     0x00U   /* yazilir ama GERI OKUNAMAZ (bkz. yukari) */
+/* G7 — heartbeat-injection acigi kapatma: sifir-disi ortak anahtar.
+ * CRYPT=0x0000 iken 433.125 MHz'deki HERHANGI bir E22 modulu 0xB0 basarsa,
+ * gercek AKS kapali/menzil disi olsa bile UKS linki "UP" sanabilir.
+ * Heartbeat protokolu (0xB0) DEGISMEZ; yalnizca RF katmani sifrelenir.
+ * AKS include/E22Regs.h (E22_CFG_CRYPT_H/L) ve tools/e2e/contract.py
+ * (E22_CRYPT_H/L) ile AYNI COMMIT'te senkron tutulmalidir (drift-guard:
+ * test_e22_register_targets_match_across_repos). Gecmis: bu deger daha
+ * once AKS tarafinda tek basina degistirilip UKS guncellenmeden birakilmis,
+ * link kirilinca ikisi de 0x0000'a geri alinmisti (bkz. AKS Documents/
+ * E22_CRYPT_SENKRON.md "Gecmis" bolumu) — bu kez iki repo AYNI commit
+ * setinde senkron guncellendi. */
+#define E22_VAL_CRYPT_H     0x5AU   /* yazilir ama GERI OKUNAMAZ (bkz. yukari) */
+#define E22_VAL_CRYPT_L     0x3CU   /* yazilir ama GERI OKUNAMAZ (bkz. yukari) */
 
 /** ADDH..REG3 sirasiyla hedef degerler — E22_ReadRegs sonucuyla
  *  karsilastirmak icin. CRYPT bilerek DAHIL DEGIL (bkz. E22_REG_VERIFY_LEN). */
