@@ -55,3 +55,48 @@ onay/iş kalemi olarak ele alınmalı.
 
 Bu değişiklikler `UYUM_NOTU.md`'ye dokunmadı — bölüm 5 (Sayım
 Konvansiyonu) ve bölüm 6 (Teknik Kontrol Checklist) yapısı korunuyor.
+
+## E32/merge-rebase bayat notlarının temizliği (2026-07-09)
+
+`UKS-Telemetry/README.md` ve `Core/Inc/telemetry.h` içinde, ESP_AKS
+tarafının 19 alanlı v2 formatını hâlâ iki ayrı dalda (BMS alan bölünmesi +
+`ts_ms`/`spd_x10` eklenmesi) tuttuğunu ve bunların merge/rebase ile
+birleştirilmesi gerektiğini söyleyen notlar vardı. Bu notlar bayattı:
+format artık ESP_AKS `lib/Telemetry/Telemetry.cpp::sendStatus` içinde tek
+parçada üretiliyor ve golden fixture'larla doğrulanmış durumda (ESP_AKS
+`test/test_native_telemetry/test_telemetry_format.cpp`,
+`tools/e2e/test_frame_contract.py`); `AKS/Documents/UKS_LoRa_Protocol.md`
+bunu "birebir doğrulandı" olarak belirtiyor.
+
+Aynı notlarda, AKS'in E32 `SPED=0xC4` değerinin yerel UART baud alanını
+1200'e düşürebileceğine dair bir uyarı ve `Core/Inc/lora.h` üstündeki
+(artık var olmayan) bir `E32_CFG_SPED` yorumuna atıf vardı. Donanım
+E32-433T30D'den E22-400T30D-V2'ye geçtiği için bu da geçersizdi; `lora.h`
+zaten E22'ye güncellenmiş durumda ve `E32_CFG_SPED` diye bir yorum
+içermiyor.
+
+Yapılan değişiklikler:
+- `UKS-Telemetry/README.md`: "ÖNEMLİ — AKS Tarafı Durumu (yazıldığı anda)"
+  başlığı "Tarihçe (çözüldü)" olarak değiştirildi; içerik güncel duruma
+  (format ESP_AKS'te üretiliyor, golden/e2e testlerle doğrulanıyor,
+  donanım E22'ye geçti) göre yeniden yazıldı.
+- `Core/Inc/telemetry.h`: Başlık yorumundaki aynı bayat "iki ayrı dal"
+  notu "NOT (çözüldü)" olarak güncellendi; format tablosu, ölçekler ve
+  9.2.a paragrafına dokunulmadı.
+- Repo genelinde `E32`/`SPED`/"merge/rebase" grep'lendi; geri kalan tüm
+  `E32` referansları (`lora.c`, `main.c`, `main.h`, `e22_regs.h`, kök
+  `README.md`) zaten tarihçe/karşılaştırma amaçlı ("E32'den FARKLI",
+  "E32 ile AYNI", "E32 → E22 migrasyonu GERÇEKLEŞTİ" gibi) doğru notlar
+  olduğu için değiştirilmedi.
+- Hiçbir `.c`/`.h` dosyasında kod satırı değişmedi; yalnızca yorum ve
+  `.md` satırları düzenlendi.
+
+**Doğrulandı:** `ESP_AKS` deposu `C:\Users\Ravzanur\Desktop\AKS\ESP_AKS`
+altında bulunup `TUFAN_UKS_REPO` ortam değişkeni bu repoya (üst dizin)
+işaret edecek şekilde ayarlanarak `pytest tools/e2e` çalıştırıldı:
+**27 passed, 1 xfailed** (xfail — `test_lb_bms_field_coverage_is_tracked`
+— bilinen/takip edilen bir eksiklik, regresyon değil). Özellikle
+`test_e32_leftover_constants_are_gone` ve `test_frame_contract.py`
+içindeki golden-vektör testleri geçti; bu, README/telemetry.h'de
+güncellenen "format ESP_AKS'te tek parçada üretiliyor ve doğrulanmış"
+iddiasını teyit ediyor.

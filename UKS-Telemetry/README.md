@@ -58,17 +58,21 @@ CSV,<timestamp_ms>,<speed_kmh_x10>,<tempH>,<packV>,<soc_hundredths>,<seq>\r\n
 PC tarafı: `T_bat_C = tempH`, `V_bat = packV / 10`, `hız = spd_x10 / 10`;
 kalan enerji PC'de `soc_hundredths`'ten türetilir.
 
-### ÖNEMLİ — AKS Tarafı Durumu (yazıldığı anda)
+### Tarihçe (çözüldü)
 
 Bu protokol UKS tarafında (bu repo) tamdır ve test edilmiştir
-(`test/native/test_telemetry_v2.c`). **ESP_AKS deposunda yazı yazıldığı
-anda hiçbir tek dal 19 alanın tümünü birlikte üretmiyor**: BMS alan
-bölünmesi (cellVMax/cellVMin/tempH/tempL/sysState/current/soc) ile
-ts_ms/spd_x10 eklenmesi iki ayrı dalda — bunların AKS tarafında
-birleştirilmesi (merge/rebase) gerekiyor. Ayrıca AKS'in E32 `SPED=0xC4`
-değeri, EBYTE datasheet'ine göre yerel UART baud alanını 1200'e
-düşürüyor olabilir (AKS'in kendi `LORA_UART_BAUD=9600` ile çakışır) —
-bkz. `Core/Inc/lora.h` üstündeki `E32_CFG_SPED` yorumu.
+(`test/native/test_telemetry_v2.c`). Önceki bir notta, ESP_AKS deposunda
+19 alanın tümünün BMS alan bölünmesi (cellVMax/cellVMin/tempH/tempL/
+sysState/current/soc) ile ts_ms/spd_x10 eklenmesi iki ayrı dalda kaldığı
+ve henüz birleştirilmediği belirtiliyordu — bu artık geçerli değil.
+Format ESP_AKS tarafında `lib/Telemetry/Telemetry.cpp::sendStatus`
+içinde tek parçada üretiliyor ve golden fixture'larla doğrulanmış
+durumda (ESP_AKS `test/test_native_telemetry/test_telemetry_format.cpp`,
+`tools/e2e/test_frame_contract.py`); ayrıca `AKS/Documents/
+UKS_LoRa_Protocol.md` formatın birebir doğrulandığını belirtiyor.
+Donanım da E32'den E22-400T30D-V2'ye geçti; E22 register konfigürasyonu
+AKS tarafında `lib/E22Config` + boot dizisiyle uygulanıyor — E32'ye özgü
+`SPED` baud endişesi artık geçerli değil.
 
 ---
 

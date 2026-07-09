@@ -24,11 +24,13 @@
  *        ts_ms          uint32, AKS boot'tan beri ms
  *        spd_x10        uint16, arac hizi x10 km/h
  *
- *      NOT: Bu format, ESP_AKS deposunda iki ayri calismanin (BMS alan
- *      bolunmesi + ts_ms/spd_x10 eklenmesi) BIRLESTIRILMESINI gerektirir;
- *      yazi yazildigi anda hicbir tek ESP_AKS dalinda 19 alanin TUMU bir
- *      arada uretilmiyor. UKS bu sozlesmeye gore hazir; AKS tarafinin da
- *      ayni birlesimi yapmasi gerekir.
+ *      NOT (cozuldu): Bu format onceden ESP_AKS deposunda iki ayri dalda
+ *      (BMS alan bolunmesi + ts_ms/spd_x10 eklenmesi) durumdaydi; bu artik
+ *      gecerli degil. Format ESP_AKS tarafinda
+ *      lib/Telemetry/Telemetry.cpp::sendStatus icinde tek parcada
+ *      uretiliyor ve golden fixture'larla dogrulaniyor (ESP_AKS
+ *      test/test_native_telemetry/test_telemetry_format.cpp,
+ *      tools/e2e/test_frame_contract.py).
  *
  *  9.2.a: RF hatti tek yonlu telemetri + heartbeat'tir (bkz. lora.h). UKS ->
  *  AKS komut kanali (eski 0xA1-0xA4) sistemden tamamen kaldirildi; acil
