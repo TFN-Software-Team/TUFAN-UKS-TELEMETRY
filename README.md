@@ -202,7 +202,7 @@ Telemetry_Process()  [ana döngü, her turda çağrılır]
 Telemetry_Parse()  [ana döngü, dashboard basmadan önce]
   → frame_q'dan en eski frame'i çıkarır (FIFO).
 ```
-`frame_q` derinliği 4 (`TEL_FRAME_Q_DEPTH`) — hava hızı ~450ms/frame iken en kötü bloklama (dashboard basımı ~60ms) pratikte 1 frame bile biriktirmiyor, 4 derinlik rahat marj.
+`frame_q` derinliği 4 (`TEL_FRAME_Q_DEPTH`) — AKS tarafı link flapping düzeltmesiyle 5 Hz'den 2 Hz'e indi (`LORA_TX_PERIOD_MS=500`), nominal frame aralığı ~500ms iken en kötü bloklama (dashboard basımı ~60ms) pratikte 1 frame bile biriktirmiyor, 4 derinlik rahat marj.
 
 Hem `rx_ring` hem `frame_q` **tek-üretici/tek-tüketici** olduğu için kritik bölüm (PRIMASK/interrupt disable) **gerekmez** — yalnızca `volatile` head/tail yeterli.
 
