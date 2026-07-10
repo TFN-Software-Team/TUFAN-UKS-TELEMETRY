@@ -231,6 +231,70 @@ static LoraStatus_t E22_WriteRegsSaved(UART_HandleTypeDef *huart, uint8_t addr,
 }
 
 /* =========================================================================
+ * E22_WriteRegsTemp — "C2 addr len vals..." gonderir (KALICI OLMAYAN/RAM
+ * yazma — guc kesilince silinir), "C1 addr len vals" yanitini bekler.
+ *
+ *  G7-FIX-2: Read-before-write skip yolu (Lora_Init, needs_write==0 dali)
+ *  CRYPT'e hicbir zaman dokunmuyordu — CRYPT geri okunamadigi icin
+ *  karsilastirmaya girmiyor (bkz. E22_REG_VERIFY_LEN) ve REG0-3 hedefleri
+ *  degismedigi surece bu dal her boot'ta tetiklenir. Sonuc: CRYPT hedefi
+ *  git'te degistirilse bile (bkz. E22_CRYPT_SENKRON.md "G7-FIX-2"),
+ *  flash'taki gercek anahtar ilk basarili tam yazimdan beri hic
+ *  degismemis olabilir. Bu fonksiyon skip dalinda her boot'ta CRYPT'i
+ *  C2 (RAM/gecici) ile yeniden yazarak bu kor noktayi kapatir — flash
+ *  omrunu etkilemez (kalici DEGIL) ve ADDH..REG3'e DOKUNMAZ.
+ *
+ *  CRYPT geri okunamadigi icin yanitta deger karsilastirmasi YAPILMAZ;
+ *  yalnizca baslik (C1 addr len) ve FF FF FF hata cercevesi kontrol
+ *  edilir, kalan deger byte'lari UART hatti temiz kalsin diye tuketilir.
+ * ========================================================================= */
+static LoraStatus_t E22_WriteRegsTemp(UART_HandleTypeDef *huart, uint8_t addr,
+                                      uint8_t len, const uint8_t *vals)
+{
+    if (len == 0U || len > E22_REG_BLOCK_LEN) return LORA_ERR;
+
+    uint8_t cmd[3U + E22_REG_BLOCK_LEN];
+    cmd[0] = E22_CMD_WRITE_TEMP;
+    cmd[1] = addr;
+    cmd[2] = len;
+    memcpy(&cmd[3], vals, len);
+
+    __HAL_UART_CLEAR_OREFLAG(huart);
+    if (HAL_UART_Transmit(huart, cmd, (uint16_t)(3U + len), 200U) != HAL_OK)
+        return LORA_ERR;
+
+    /* RAM yazma flash'a gitmez ama modul yine de AUX ile "mesgul" sinyali
+     * verir; kalici yazimla ayni bekleme marjini kullanilir. */
+    if (E22_WaitAuxHigh(E22_AUX_CFG_TIMEOUT_MS) != LORA_OK)
+        return LORA_ERR_TIMEOUT;
+
+    uint8_t hdr[3] = {0};
+    if (HAL_UART_Receive(huart, hdr, sizeof(hdr), 500U) != HAL_OK)
+    {
+        HAL_UART_Abort(huart);
+        __HAL_UART_CLEAR_OREFLAG(huart);
+        return LORA_ERR_TIMEOUT;
+    }
+
+    if (memcmp(hdr, E22_RSP_BAD, sizeof(hdr)) == 0)
+        return LORA_ERR;   /* FF FF FF: modul yazmayi reddetti */
+
+    /* Yanit basligi C1'dir (C0/C2 DEGIL) — bkz. E22_WriteRegsSaved yorumu */
+    if (hdr[0] != E22_CMD_READ || hdr[1] != addr || hdr[2] != len)
+        return LORA_ERR;
+
+    uint8_t resp_vals[E22_REG_BLOCK_LEN] = {0};
+    if (HAL_UART_Receive(huart, resp_vals, len, 500U) != HAL_OK)
+    {
+        HAL_UART_Abort(huart);
+        __HAL_UART_CLEAR_OREFLAG(huart);
+        return LORA_ERR_TIMEOUT;
+    }
+
+    return LORA_OK;   /* deger karsilastirmasi yok — CRYPT geri okunamaz */
+}
+
+/* =========================================================================
  * Boot-log: register blogunu hex dump'la (bench dump teyidi icin — HER
  * boot'ta, yazma yapilsa da yapilmasa da basilir).
  * ========================================================================= */
@@ -327,10 +391,27 @@ LoraStatus_t Lora_Init(LoraCtx_t *ctx, UART_HandleTypeDef *huart)
 
         if (!needs_write)
         {
-            /* Read-before-write: ADDH..REG3 zaten hedefle ayni -> YAZMA.
-             * CRYPT geri okunamadigi icin karsilastirma disi (bkz.
-             * E22_REG_VERIFY_LEN); flash omru boylece korunur. */
-            printf("[CFG] Tum alanlar (ADDH..REG3) hedefle ayni — YAZMA ATLANDI (flash omru).\r\n");
+            /* Read-before-write: ADDH..REG3 zaten hedefle ayni -> kalici
+             * (C0) YAZMA ATLANDI (flash omru). CRYPT geri okunamadigi
+             * icin karsilastirma disi (bkz. E22_REG_VERIFY_LEN).
+             *
+             * G7-FIX-2: bu yuzden CRYPT hedefi git'te degistirilse bile
+             * flash'taki gercek anahtar guncellenmiyor olabilirdi (bkz.
+             * E22_CRYPT_SENKRON.md "G7-FIX-2"). Her boot'ta CRYPT'i
+             * C2/RAM (kalici olmayan) ile yeniden yazarak bu kor noktayi
+             * kapatiyoruz — best-effort, hata boot'u durdurmaz. */
+            printf("[CFG] Tum alanlar (ADDH..REG3) hedefle ayni — kalici (C0) YAZMA ATLANDI (flash omru).\r\n");
+
+            const uint8_t crypt_vals[2] = { E22_VAL_CRYPT_H, E22_VAL_CRYPT_L };
+            if (E22_WriteRegsTemp(huart, E22_REG_CRYPT_H, 2U, crypt_vals) == LORA_OK)
+            {
+                printf("[CFG] CRYPT (0x5A3C) gecici (C2/RAM) yazildi.\r\n");
+            }
+            else
+            {
+                printf("[CFG] UYARI: CRYPT gecici (C2/RAM) yazma basarisiz — link calismayabilir.\r\n");
+            }
+
             cfg_st = LORA_OK;
         }
         else
