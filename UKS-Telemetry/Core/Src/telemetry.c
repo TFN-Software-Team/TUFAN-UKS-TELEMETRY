@@ -560,11 +560,15 @@ void Telemetry_PrintDashboard(const TelData_t *d, TelStatus_t status,
     Print_SocBar((uint8_t)soc_pct);
     printf(" |\r\n");
 
+    // NOT: bms_current_centima birimi centi-Amper (0.01 A)'dir (AKS
+    // TEL_bmsCurrentCentiA ile ayni) — /100 ve %100 zaten dogru Amper +
+    // 2-ondalik kesir uretiyor. Etiket ONCEDEN yanlislikla "mA" yaziyordu
+    // (deger dogruydu, yalnizca birim etiketi 1000x yanilticiydi).
     long     ca = d->bms_current_centima / 100;
     long     cd = d->bms_current_centima % 100; if (cd < 0) cd = -cd;
     unsigned va = (unsigned)(d->bms_pack_voltage_deciv / 10U);
     unsigned vd = (unsigned)(d->bms_pack_voltage_deciv % 10U);
-    printf("  |   Curr   : %6ld.%02ld mA  Pack : %3u.%u V      |\r\n",
+    printf("  |   Curr   : %6ld.%02ld A   Pack : %3u.%u V      |\r\n",
            ca, cd, va, vd);
 
     printf("  |   TempH  : %4d C   TempL : %4d C",

@@ -41,15 +41,16 @@ değillerdi, yalnızca artık kodu yansıtmıyorlardı.
 `Parse_U32` ile düzeltildi (bkz. commit `1918430`); v2 tabloları bu son
 hâli yansıtıyor.
 
-## Bilinen istisna — kasıtlı olarak dokunulmadı
+## Bilinen istisna — ÇÖZÜLDÜ (2026-07-13)
 
 `AKS/Documents/UKS_LoRa_Protocol.md` içindeki "Alan Aralıkları ve AKS
 Tarafı Sanitizasyon" bölümünün hemen üstündeki NOT ("yukarıdaki tablo
-v1'dir, güncel değildir") artık **yanlış** — o bölümün üstündeki tablo bu
-değişiklikle v2'ye güncellendi. Ancak "Alan Aralıkları ve AKS Tarafı
-Sanitizasyon" bölümüne (bu notu da içeren blok) görev kapsamında
-dokunulmaması açıkça istendiği için not güncellenmedi. Bu, ayrı bir
-onay/iş kalemi olarak ele alınmalı.
+v1'dir, güncel değildir") yanlıştı — o bölümün üstündeki tablo bu
+değişiklikle v2'ye güncellenmişti, yalnızca bu NOT güncellenmeden
+bırakılmıştı (o zaman görev kapsamı dışında tutulmuştu). Ayrı bir
+görevde ("ESP_AKS'te kodla çelişen bayat yorumları düzelt") bu NOT da
+düzeltildi: artık yukarıdaki tablonun da güncel (v2, 19 alan) olduğunu
+ve iki tablonun tutarlı olduğunu belirtiyor. Bu iş kalemi kapandı.
 
 ## UYUM_NOTU.md
 

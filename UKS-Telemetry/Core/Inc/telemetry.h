@@ -18,7 +18,11 @@
  *        tempH/tempL    int8 kaynak (burada int16 saklanir), derece C
  *        sysState       uint8, 1=Discharge 2=IDLE 3=Charge 4=FAULT
  *        packV          uint16, x0.1 V
- *        current        int32,  x0.01 mA (+sarj / -desarj)
+ *        current        int32,  x0.01 A (centi-Amper) (+sarj / -desarj)
+ *                       (ONCEDEN birim yanlislikla 1000 kat kucuk yaziliyordu
+ *                       (miliamper zannedilmisti) — AKS TEL_bmsCurrentCentiA
+ *                       ile AYNI birim, bkz. AKS Telemetry.h sendStatus birim
+ *                       sozlesmesi yorumu / Documents/UKS_LoRa_Protocol.md)
  *        soc            uint16, x0.01 %  (0..10000 = %0.00..%100.00)
  *        bmsValid       0/1
  *        ts_ms          uint32, AKS boot'tan beri ms
@@ -128,7 +132,15 @@ typedef struct {
     int16_t   bms_temp_lowest_c;      /* derece C */
     uint8_t   bms_system_state;       /* 1=Discharge 2=IDLE 3=Charge 4=FAULT */
     uint16_t  bms_pack_voltage_deciv; /* x0.1 V */
-    int32_t   bms_current_centima;    /* x0.01 mA (+sarj / -desarj) */
+    /* NOT: alan adi "centima" (centi-mA cagristirir) ama gercek birim
+     * centi-Amper (0.01 A) — AKS TEL_bmsCurrentCentiA ile AYNI. Alan ADI
+     * ABI/wire-format'in bir parcasi DEGIL (yalnizca bu struct'in ic
+     * kullanimi), bu yuzden yaniltici olsa da wire uyumunu BOZMADAN
+     * "bms_current_centiamp" gibi bir isme yeniden adlandirilabilir —
+     * ancak bu yeniden adlandirma bu degisiklikte YAPILMADI (telemetry.c
+     * + test/native/test_telemetry_v2.c gibi tum kullanim yerlerini
+     * etkiler); asgari duzeltme olarak BIRIM yorumu asagida dogru: */
+    int32_t   bms_current_centima;    /* x0.01 A (centi-Amper) (+sarj / -desarj) */
     uint16_t  bms_soc_hundredths;     /* x0.01 % (0..10000 = %0.00..%100.00) */
     uint8_t   bms_data_valid;
 
