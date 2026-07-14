@@ -51,7 +51,7 @@ UKS-Telemetry/
 
 > 9.2.a: eski PA0 ve PB11 pin atamaları (uzaktan durdurma donanımı) kaldırıldı — acil durdurma araç üstündeki fiziksel kontaktörle sağlanır, RF/UKS'ten bağımsızdır.
 
-**Saat kaynağı:** HSI 8 MHz, **PLL kapalı** (kasıtlı — bkz. §6, BUG #6). USART1 @ 115200 baud, HSI 8 MHz'de BRR hata payı ~%0.16 (sınır %2'nin çok altında).
+**Saat kaynağı:** HSI 8 MHz, **PLL kapalı** (kasıtlı — bkz. §6, BUG #6). USART1 @ 115200 baud, HSI 8 MHz'de BRR hata payı ~%0.64 — 115200 için kabul edilebilir tolerans içinde (<%2).
 
 **E22 mod tablosu (M0/M1)** — ayrıntılı açıklama için bkz. §3:
 

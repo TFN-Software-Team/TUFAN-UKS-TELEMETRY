@@ -358,7 +358,8 @@ static void MX_GPIO_Init(void)
  * kalkar.
  *
  * USART1 @ 115200 baud, HSI 8 MHz:
- *   BRR = 8_000_000 / 115200 ≈ 69.4 → ~0.16% hata (sinir: <2%) ✓
+ *   BRR = 8_000_000 / 115200 ≈ 69.4 → ~0.64% hata — 115200 icin kabul
+ *   edilebilir tolerans icinde (sinir: <%2)
  * ==================================================================== */
 void SystemClock_Config(void)
 {
