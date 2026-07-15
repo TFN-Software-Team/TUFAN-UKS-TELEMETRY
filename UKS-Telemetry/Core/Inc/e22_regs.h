@@ -15,12 +15,14 @@
  *  (AKS ve UKS arasinda paylasilan, iki tarafta birebir ayni olmasi
  *  gereken register hedef degerleri).
  *
- *  DOGRULAMA NOTU (baglayici, sozlesmeden): E22'nin V1 ve V2
- *  firmware'lerinde register haritasi FARKLIDIR (V2'de NETID eklendi,
- *  sonraki adresler kaydi). Asagidaki harita V2 VARSAYIMIDIR ve HENUZ
- *  bench'te dogrulanmadi. Lora_Init() her boot'ta C1 ile TUM bloğu okuyup
- *  hex dump basar; bu dump elimizdeki modulun gercek davranisiyla
- *  karsilastirilip adres sabitleri (yalniz burada) duzeltilecek.
+ *  DOGRULANDI (2026-07-15, bench dump — bkz. AKS Documents/
+ *  BENCH_E22_TEYIT.md "Sonuc Kaydi"): E22'nin V1 ve V2 firmware'lerinde
+ *  register haritasi FARKLIDIR (V2'de NETID eklendi, sonraki adresler
+ *  kaydi). Asagidaki harita V2 haritasidir; AKS ve UKS'ten alinan C1 okuma
+ *  dump'lari bu adreslerin gercek donanimla (ve birbiriyle) birebir
+ *  estigini dogruladi. Lora_Init() her boot'ta C1 ile TUM bloğu okuyup
+ *  hex dump basmaya devam eder — farkli bir modul/firmware varyanti
+ *  kullanilirsa sapmayi erken yakalamak icin.
  *
  *  DATASHEET CELISKISI: Bu implementasyon sirasinda erisilen genel EBYTE
  *  E22 dokumantasyon bilgisi asagidaki REG0/REG1 bit yerlesimiyle
@@ -30,17 +32,17 @@
  * ========================================================================= */
 
 /* -------------------------------------------------------------------------
- * Register ADRESLERI (V2 haritasi — bench dump ile teyit edilecek)
+ * Register ADRESLERI (V2 haritasi — 2026-07-15 bench dump ile dogrulandi)
  * ------------------------------------------------------------------------- */
-#define E22_REG_ADDH        0x00U   /* V2 haritasi — bench dump ile teyit edilecek */
-#define E22_REG_ADDL        0x01U   /* V2 haritasi — bench dump ile teyit edilecek */
-#define E22_REG_NETID       0x02U   /* V2'de eklendi (V1'de yok) — bench dump ile teyit edilecek */
-#define E22_REG_REG0        0x03U   /* V2 haritasi — bench dump ile teyit edilecek: UART/hava hizi */
-#define E22_REG_REG1        0x04U   /* V2 haritasi — bench dump ile teyit edilecek: alt-paket/RSSI/guc */
-#define E22_REG_REG2        0x05U   /* V2 haritasi — bench dump ile teyit edilecek: kanal */
-#define E22_REG_REG3        0x06U   /* V2 haritasi — bench dump ile teyit edilecek: RSSI-byte/mod/LBT */
-#define E22_REG_CRYPT_H     0x07U   /* V2 haritasi — bench dump ile teyit edilecek; GERI OKUNAMAZ */
-#define E22_REG_CRYPT_L     0x08U   /* V2 haritasi — bench dump ile teyit edilecek; GERI OKUNAMAZ */
+#define E22_REG_ADDH        0x00U   /* V2 haritasi — bench dump ile dogrulandi (2026-07-15) */
+#define E22_REG_ADDL        0x01U   /* V2 haritasi — bench dump ile dogrulandi (2026-07-15) */
+#define E22_REG_NETID       0x02U   /* V2'de eklendi (V1'de yok) — bench dump ile dogrulandi (2026-07-15) */
+#define E22_REG_REG0        0x03U   /* V2 haritasi — bench dump ile dogrulandi (2026-07-15): UART/hava hizi */
+#define E22_REG_REG1        0x04U   /* V2 haritasi — bench dump ile dogrulandi (2026-07-15): alt-paket/RSSI/guc */
+#define E22_REG_REG2        0x05U   /* V2 haritasi — bench dump ile dogrulandi (2026-07-15): kanal */
+#define E22_REG_REG3        0x06U   /* V2 haritasi — bench dump ile dogrulandi (2026-07-15): RSSI-byte/mod/LBT */
+#define E22_REG_CRYPT_H     0x07U   /* V2 haritasi — bench dump ile dogrulandi (2026-07-15); GERI OKUNAMAZ */
+#define E22_REG_CRYPT_L     0x08U   /* V2 haritasi — bench dump ile dogrulandi (2026-07-15); GERI OKUNAMAZ */
 
 /** Config blogunun basi ve toplam uzunlugu (ADDH..CRYPT_L, 9 byte). */
 #define E22_REG_BLOCK_START E22_REG_ADDH

@@ -86,7 +86,7 @@ Boot sırasında `Lora_Init()` şu sırayı izler: GPIO hazırla → AUX HIGH be
 | HIGH | LOW | WOR (kullanılmıyor) |
 | HIGH | HIGH | E22'de kullanılmıyor (E32'de config modu buydu) |
 
-### Register haritası (V2 varsayımı — bench dump ile teyit edilecek)
+### Register haritası (V2 — 2026-07-15 bench dump ile doğrulandı)
 
 | Adres | Register | Hedef değer | Anlam |
 |---|---|---|---|
@@ -100,7 +100,7 @@ Boot sırasında `Lora_Init()` şu sırayı izler: GPIO hazırla → AUX HIGH be
 | 0x07 | `CRYPT_H` | 0x00 | Yazılır, **geri okunamaz** |
 | 0x08 | `CRYPT_L` | 0x00 | Yazılır, **geri okunamaz** |
 
-> **DOĞRULAMA NOTU (bağlayıcı):** E22'nin V1 ve V2 firmware'lerinde register haritası farklıdır (V2'de `NETID` eklendi, sonraki adresler kaydı). Yukarıdaki harita **V2 varsayımıdır**, henüz bench'te doğrulanmadı. `Lora_Init()` her boot'ta bloğu okuyup hex dump basar; bu dump datasheet/gerçek modül davranışıyla karşılaştırılıp adres sabitleri gerekirse **tek yerden** (`e22_regs.h`) düzeltilecek.
+> **DOĞRULAMA NOTU (bağlayıcı, 2026-07-15'te bench'te DOĞRULANDI):** E22'nin V1 ve V2 firmware'lerinde register haritası farklıdır (V2'de `NETID` eklendi, sonraki adresler kaydı). Yukarıdaki harita **V2 haritasıdır**; AKS ve UKS'ten alınan `C1` okuma dump'ları bu adreslerin gerçek donanımla (ve birbiriyle) birebir eştiğini doğruladı (bkz. AKS `Documents/BENCH_E22_TEYIT.md` "Sonuç Kaydı"). `Lora_Init()` her boot'ta bloğu okuyup hex dump basmaya devam eder — farklı bir modül/firmware varyantı kullanılırsa sapmayı erken yakalamak için.
 
 **Frekans formülü:** `frekans (MHz) = 410.125 + REG2`. `REG2=0x17` (23 ondalık) → `410.125 + 23 = 433.125 MHz` (433 ISM bandı 433.05–434.79 içinde).
 
@@ -326,8 +326,8 @@ Beklenen çıktı: `55 checks, 0 failures`.
 ## 11. Bilinen Açık Konular
 
 - **M0/M1 donanım bağlantısı doğrulandı:** Ravza, M0/M1'in STM32'ye (PB6/PB7) bağlı olduğunu fiziksel olarak teyit etti; `main.h` ve kod tabanı bununla tutarlı.
-- **AKS tarafı config-on-boot — ARTIK VAR:** Önceki bilinen boşluk ("production AKS firmware'inde config yazımı yoktur") güncelliğini yitirdi. AKS artık boot'ta kendi E22 modülünü konfigüre ediyor (`vTask_LoRa_UKS` boot sırası + `lib/E22Config`, ESP_AKS commit `0caa38b`). Kalan risk: UKS (`e22_regs.h`) ve AKS (`E22Config`) tarafındaki register hedef değerlerinin **birebir aynı** olduğu henüz çapraz doğrulanmadı — bkz. §3 doğrulama notu.
-- **E32 → E22 migrasyonu GERÇEKLEŞTİ (iki tarafta da):** Donanım E32-433T30D'den E22-400T30D-V2'ye (SX1268, 30 dBm) geçirildi; register-tabanlı `C0`/`C1` config protokolü, farklı config-modu pin seviyeleri (M0=0,M1=1) ve register haritası `Core/Inc/e22_regs.h`'de tek doğruluk kaynağı olarak tanımlı (bkz. §3). Karşı uçtaki AKS (ESP32) da E22'ye geçti (`lib/E22Config`). Register haritası UKS tarafında henüz **V2 varsayımı** — bench dump ile teyit bekliyor (bkz. §3 doğrulama notu).
+- **AKS tarafı config-on-boot — ARTIK VAR:** Önceki bilinen boşluk ("production AKS firmware'inde config yazımı yoktur") güncelliğini yitirdi. AKS artık boot'ta kendi E22 modülünü konfigüre ediyor (`vTask_LoRa_UKS` boot sırası + `lib/E22Config`, ESP_AKS commit `0caa38b`). UKS (`e22_regs.h`) ve AKS (`E22Config`) tarafındaki register hedef değerlerinin **birebir aynı** olduğu 2026-07-15'te bench dump ile çapraz doğrulandı — bkz. §3 doğrulama notu.
+- **E32 → E22 migrasyonu GERÇEKLEŞTİ (iki tarafta da):** Donanım E32-433T30D'den E22-400T30D-V2'ye (SX1268, 30 dBm) geçirildi; register-tabanlı `C0`/`C1` config protokolü, farklı config-modu pin seviyeleri (M0=0,M1=1) ve register haritası `Core/Inc/e22_regs.h`'de tek doğruluk kaynağı olarak tanımlı (bkz. §3). Karşı uçtaki AKS (ESP32) da E22'ye geçti (`lib/E22Config`). Register haritası 2026-07-15'te bench dump ile **doğrulandı** (bkz. §3 doğrulama notu, AKS `Documents/BENCH_E22_TEYIT.md` "Sonuç Kaydı").
 - **VCU state alanı planlı, henüz yok:** AKS telemetri paketine VCU durumu eklenmesi planlanıyor — bu, protokol versiyon bump'ı ve UKS parser'ında koordineli güncelleme gerektirecek (19 alan kuralını bozmadan).
 
 ---
