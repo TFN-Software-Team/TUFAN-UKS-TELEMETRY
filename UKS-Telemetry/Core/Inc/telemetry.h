@@ -90,9 +90,13 @@
 
 /* Link-down esigi: bu suredir gecerli TEL frame'i gelmediyse baglanti
  * kopmus sayilir (bkz. main.c link_down state, UYUM_NOTU.md bolum 2).
- * AKS tarafi link flapping duzeltmesiyle 2 Hz'e indi (LORA_TX_PERIOD_MS=500);
- * nominal frame araligi ~500 ms, bu deger hala 4x marj birakiyor —
- * DEGISTIRILMEDI. */
+ * AKS tarafi 4.8 kbps hava hizi kalibrasyonuyla 2 Hz'e geri dondu
+ * (LORA_TX_PERIOD_MS=500, bkz. AKS SystemConfig.h); nominal frame araligi
+ * ~500 ms. Onceki deger (4000U) onceki periyotla (1000 ms) tam 4x marj
+ * tasiyordu; ayni 4x oran AYNI COMMIT'te korunarak 2000U'ya yeniden
+ * kalibre edildi (>= 3x LORA_TX_PERIOD_MS invaryanti icin bkz.
+ * tools/e2e/test_contract_drift.py::
+ * test_uks_tel_link_timeout_has_enough_margin_over_tx_period). */
 #define TEL_LINK_TIMEOUT_MS     2000U
 
 /* ========== Tipler ========== */
