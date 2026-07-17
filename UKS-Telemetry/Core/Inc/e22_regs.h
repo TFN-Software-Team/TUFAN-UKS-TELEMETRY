@@ -60,15 +60,16 @@
 #define E22_VAL_ADDL        0x00U   /* adres 0x0000: hedefli degil, genel/broadcast */
 #define E22_VAL_NETID       0x00U
 
-/* REG0 = 0x62 = 0110 0010b
+/* REG0 = 0x63 = 0110 0011b
  *   bit[7:5] = 011 -> UART 9600 baud (STM32 USART2 ile AYNI olmali)
  *   bit[4:3] = 00  -> 8N1, parity yok
- *   bit[2:0] = 010 -> hava hizi 2.4 kbps (AKS ile AYNI olmak ZORUNDA —
- *                     fiziksel RF parametresi, yerel degil; 9.6 kbps'ten
- *                     menzil artisi icin dusuruldu, ekip onayli kalibrasyon —
- *                     bkz. AKS SystemConfig.h LORA_TX_PERIOD_MS ayni commit'te
- *                     500->1000 ms'e ayarlandi) */
-#define E22_VAL_REG0        0x62U
+ *   bit[2:0] = 011 -> hava hizi 4.8 kbps (AKS ile AYNI olmak ZORUNDA —
+ *                     fiziksel RF parametresi, yerel degil; parkur kesfinde
+ *                     maksimum mesafe 500 m olculdu, 2.4 kbps asiri tedbirdi
+ *                     — ekip onayli kalibrasyon, bkz. AKS SystemConfig.h
+ *                     LORA_TX_PERIOD_MS ayni commit'te 1000->500 ms'e
+ *                     (2 Hz'e) geri dondu) */
+#define E22_VAL_REG0        0x63U
 
 /* REG1 = 0x00 = 0000 0000b
  *   bit[7:6] = 00 -> alt-paket 240 B
