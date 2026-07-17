@@ -93,7 +93,7 @@ Boot sırasında `Lora_Init()` şu sırayı izler: GPIO hazırla → AUX HIGH be
 | 0x00 | `ADDH` | 0x00 | Adres yüksek bayt |
 | 0x01 | `ADDL` | 0x00 | Adres düşük bayt (0x0000 = genel/broadcast) |
 | 0x02 | `NETID` | 0x00 | V2'de eklendi (V1 haritasında yok) |
-| 0x03 | `REG0` | 0x64 | UART 9600 baud \| 8N1, parity yok \| hava hızı 9.6 kbps |
+| 0x03 | `REG0` | 0x63 | UART 9600 baud \| 8N1, parity yok \| hava hızı 4.8 kbps |
 | 0x04 | `REG1` | 0x00 | Alt-paket 240 B \| RSSI ortam gürültüsü KAPALI \| TX gücü kademe 0 (**en yüksek**, T30D: 30 dBm) |
 | 0x05 | `REG2` | 0x17 | Kanal 23 → 433.125 MHz |
 | 0x06 | `REG3` | 0x00 | **RSSI byte KAPALI** \| transparan mod \| röle kapalı \| LBT kapalı |
