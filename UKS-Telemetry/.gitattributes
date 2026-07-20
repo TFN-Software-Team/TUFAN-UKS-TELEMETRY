@@ -1,0 +1,2 @@
+*.make text eol=lf
+STM32Make.make text eol=lf
