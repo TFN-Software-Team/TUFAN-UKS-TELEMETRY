@@ -93,7 +93,7 @@ Boot sırasında `Lora_Init()` şu sırayı izler: GPIO hazırla → AUX HIGH be
 | 0x00 | `ADDH` | 0x00 | Adres yüksek bayt |
 | 0x01 | `ADDL` | 0x00 | Adres düşük bayt (0x0000 = genel/broadcast) |
 | 0x02 | `NETID` | 0x00 | V2'de eklendi (V1 haritasında yok) |
-| 0x03 | `REG0` | 0x63 | UART 9600 baud \| 8N1, parity yok \| hava hızı 4.8 kbps |
+| 0x03 | `REG0` | 0x62 | UART 9600 baud \| 8N1, parity yok \| hava hızı 2.4 kbps |
 | 0x04 | `REG1` | 0x00 | Alt-paket 240 B \| RSSI ortam gürültüsü KAPALI \| TX gücü kademe 0 (**en yüksek**, T30D: 30 dBm) |
 | 0x05 | `REG2` | 0x17 | Kanal 23 → 433.125 MHz |
 | 0x06 | `REG3` | 0x00 | **RSSI byte KAPALI** \| transparan mod \| röle kapalı \| LBT kapalı |
@@ -202,7 +202,7 @@ Telemetry_Process()  [ana döngü, her turda çağrılır]
 Telemetry_Parse()  [ana döngü, dashboard basmadan önce]
   → frame_q'dan en eski frame'i çıkarır (FIFO).
 ```
-`frame_q` derinliği 4 (`TEL_FRAME_Q_DEPTH`) — AKS tarafı link flapping düzeltmesiyle 5 Hz'den 2 Hz'e indi (`LORA_TX_PERIOD_MS=500`), nominal frame aralığı ~500ms iken en kötü bloklama (dashboard basımı ~60ms) pratikte 1 frame bile biriktirmiyor, 4 derinlik rahat marj.
+`frame_q` derinliği 4 (`TEL_FRAME_Q_DEPTH`) — AKS tarafı 2026-07-20 kalibrasyonuyla 1 Hz'e döndü (`LORA_TX_PERIOD_MS=1000`), nominal frame aralığı ~1000ms iken en kötü bloklama (dashboard basımı ~60ms) pratikte 1 frame bile biriktirmiyor, 4 derinlik rahat marj.
 
 Hem `rx_ring` hem `frame_q` **tek-üretici/tek-tüketici** olduğu için kritik bölüm (PRIMASK/interrupt disable) **gerekmez** — yalnızca `volatile` head/tail yeterli.
 
