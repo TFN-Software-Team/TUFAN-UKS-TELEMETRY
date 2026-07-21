@@ -163,7 +163,9 @@ int main(void)
      *   2. AUX HIGH bekle         (E22 boot tamamlansin)
      *   3. Config moduna gec      (M0=0, M1=1 — E32'den FARKLI)
      *   4. Register blogunu (ADDH..CRYPT_L) oku + hex dump'la; hedeften
-     *      (e22_regs.h) farkliysa C0 ile flash'a yaz ve dogrula
+     *      (e22_regs.h) farkliysa C0 ile flash'a yaz ve dogrula; ayniysa
+     *      (flash'a yazilmaz) CRYPT G7-FIX-2 geregi C2/RAM (kalici
+     *      olmayan) ile her boot yeniden yazilir
      *   5. Normal moda don
      */
     LoraStatus_t ls = Lora_Init(&lora_ctx, &huart2);
