@@ -62,7 +62,9 @@ void Error_Handler(void);
  * Boot'ta Lora_Init() icinde:
  *   1. PB6/PB7 output PP olarak ayarlanir, LOW yazilir (normal mod).
  *   2. Config moduna alinip (M0=0,M1=1) mevcut register blogu okunur;
- *      hedeften (e22_regs.h) farkliysa C0 ile flash'a yazilir.
+ *      hedeften (e22_regs.h) farkliysa C0 ile flash'a yazilir; ayniysa
+ *      (flash'a yazilmaz) CRYPT G7-FIX-2 geregi C2/RAM (kalici olmayan)
+ *      ile her boot yeniden yazilir.
  *   3. Normal moda donulur.
  * -------------------------------------------------------------------------- */
 #define E22_M0_Pin              GPIO_PIN_6

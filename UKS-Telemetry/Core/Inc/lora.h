@@ -58,8 +58,10 @@ typedef struct {
 /**
  * @brief  E22 GPIO'larini hazirlar, config moduna girip mevcut register
  *         blogunu (ADDH..CRYPT_L) okur; hedeften (e22_regs.h) farkli ise
- *         C0 ile flash'a kalici yazar (ayniysa YAZMAZ — flash omru),
- *         Normal moda doner.
+ *         C0 ile flash'a kalici yazar (ayniysa YAZMAZ — flash omru).
+ *         ADDH..REG3 zaten hedefle ayni oldugu (flash'a yazilmadigi)
+ *         dalda CRYPT, G7-FIX-2 geregi C2/RAM (kalici olmayan) ile her
+ *         boot yeniden yazilir. Ardindan Normal moda doner.
  *
  * @retval LORA_OK          Basarili (yazildi ya da zaten hedefle esiyordu)
  *         LORA_ERR_TIMEOUT AUX zaman asimi (donanim / besleme kontrol et)

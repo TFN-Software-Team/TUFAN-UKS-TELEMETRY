@@ -13,8 +13,9 @@
   *  FIX-E22: M0/M1 artik PB6/PB7 — Lora_Init() icinde config moduna
   *           alinip register blogu (e22_regs.h hedefleri) flash'a kalici
   *           olarak yazilir (read-before-write: zaten hedefle ayniysa
-  *           yazmaz). Eski kodda bu pinler floating kaliyor, modul mod
-  *           belirsiz hale geliyordu → rx_byte = 0.
+  *           yazmaz; bu dalda CRYPT G7-FIX-2 geregi C2/RAM ile her boot
+  *           yeniden yazilir). Eski kodda bu pinler floating kaliyor,
+  *           modul mod belirsiz hale geliyordu → rx_byte = 0.
   *  E32->E22: LoRa donanimi E32-433T30D'den E22-400T30D-V2'ye (SX1268,
   *           30 dBm) geciyor; config protokolu register-tabanli C0/C1
   *           komutlarina degisti (bkz. Core/Inc/e22_regs.h, Core/Src/lora.c).
@@ -162,7 +163,9 @@ int main(void)
      *   2. AUX HIGH bekle         (E22 boot tamamlansin)
      *   3. Config moduna gec      (M0=0, M1=1 — E32'den FARKLI)
      *   4. Register blogunu (ADDH..CRYPT_L) oku + hex dump'la; hedeften
-     *      (e22_regs.h) farkliysa C0 ile flash'a yaz ve dogrula
+     *      (e22_regs.h) farkliysa C0 ile flash'a yaz ve dogrula; ayniysa
+     *      (flash'a yazilmaz) CRYPT G7-FIX-2 geregi C2/RAM (kalici
+     *      olmayan) ile her boot yeniden yazilir
      *   5. Normal moda don
      */
     LoraStatus_t ls = Lora_Init(&lora_ctx, &huart2);
