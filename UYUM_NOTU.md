@@ -57,8 +57,8 @@ gelmezse UKS `LINK,DOWN` durumuna geçer ve PC'ye/konsola bildirir; geçerli
 bir frame geldiğinde `LINK,UP` ile geri döner.
 
 **Doğrulanmadı:** Bu bölümdeki 9.2.a yorumu ekip tarafından yapılmış bir
-okumadır; madde 4'teki açık soru gibi, teknik kontrole girmeden önce
-danışmana/jüriye teyit ettirilmelidir.
+okumadır; teknik kontrole girmeden önce danışmana/jüriye teyit
+ettirilmelidir.
 
 ## 3. İzleme Merkezi = PC
 
