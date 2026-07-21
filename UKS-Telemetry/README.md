@@ -58,24 +58,12 @@ CSV,<timestamp_ms>,<speed_kmh_x10>,<tempH>,<packV>,<soc_hundredths>,<seq>\r\n
 PC tarafı: `T_bat_C = tempH`, `V_bat = packV / 10`, `hız = spd_x10 / 10`;
 kalan enerji PC'de `soc_hundredths`'ten türetilir.
 
-### Tarihçe (çözüldü)
-
 Bu protokol UKS tarafında (bu repo) tamdır ve test edilmiştir
-(`test/native/test_telemetry_v2.c`). Önceki bir notta, ESP_AKS deposunda
-19 alanın tümünün BMS alan bölünmesi (cellVMax/cellVMin/tempH/tempL/
-sysState/current/soc) ile ts_ms/spd_x10 eklenmesi iki ayrı dalda kaldığı
-ve henüz birleştirilmediği belirtiliyordu — bu artık geçerli değil.
-Format ESP_AKS tarafında `lib/Telemetry/Telemetry.cpp::sendStatus`
-içinde tek parçada üretiliyor ve golden fixture'larla doğrulanmış
-durumda (ESP_AKS `test/test_native_telemetry/test_telemetry_format.cpp`,
+(`test/native/test_telemetry_v2.c`). Format ESP_AKS tarafında
+`lib/Telemetry/Telemetry.cpp::sendStatus` içinde tek parçada üretiliyor
+ve golden fixture'larla doğrulanmış durumda (ESP_AKS
+`test/test_native_telemetry/test_telemetry_format.cpp`,
 `tools/e2e/test_frame_contract.py`); ayrıca `AKS/Documents/
 UKS_LoRa_Protocol.md` formatın birebir doğrulandığını belirtiyor.
-Donanım da E32'den E22-400T30D-V2'ye geçti; E22 register konfigürasyonu
-AKS tarafında `lib/E22Config` + boot dizisiyle uygulanıyor — E32'ye özgü
-`SPED` baud endişesi artık geçerli değil.
-
----
-
-> **Not:** Bu dosyada daha önce "Elektromobil Güvenlik Kontrol Sistemi"
-> adlı, bu firmware ile ilgisiz eski bir konsol demosu placeholder olarak
-> duruyordu. Arşiv amaçlı [`docs/legacy/elektromobil-guvenlik-demo.md`](../docs/legacy/elektromobil-guvenlik-demo.md)'ye taşındı.
+Donanım tarafı E22-400T30D-V2; E22 register konfigürasyonu AKS
+tarafında `lib/E22Config` + boot dizisiyle uygulanıyor.

@@ -41,22 +41,6 @@ değillerdi, yalnızca artık kodu yansıtmıyorlardı.
 `Parse_U32` ile düzeltildi (bkz. commit `1918430`); v2 tabloları bu son
 hâli yansıtıyor.
 
-## Bilinen istisna — ÇÖZÜLDÜ (2026-07-13)
-
-`AKS/Documents/UKS_LoRa_Protocol.md` içindeki "Alan Aralıkları ve AKS
-Tarafı Sanitizasyon" bölümünün hemen üstündeki NOT ("yukarıdaki tablo
-v1'dir, güncel değildir") yanlıştı — o bölümün üstündeki tablo bu
-değişiklikle v2'ye güncellenmişti, yalnızca bu NOT güncellenmeden
-bırakılmıştı (o zaman görev kapsamı dışında tutulmuştu). Ayrı bir
-görevde ("ESP_AKS'te kodla çelişen bayat yorumları düzelt") bu NOT da
-düzeltildi: artık yukarıdaki tablonun da güncel (v2, 19 alan) olduğunu
-ve iki tablonun tutarlı olduğunu belirtiyor. Bu iş kalemi kapandı.
-
-## UYUM_NOTU.md
-
-Bu değişiklikler `UYUM_NOTU.md`'ye dokunmadı — bölüm 5 (Sayım
-Konvansiyonu) ve bölüm 6 (Teknik Kontrol Checklist) yapısı korunuyor.
-
 ## E32/merge-rebase bayat notlarının temizliği (2026-07-09)
 
 `UKS-Telemetry/README.md` ve `Core/Inc/telemetry.h` içinde, ESP_AKS
