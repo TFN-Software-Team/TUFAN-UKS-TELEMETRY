@@ -129,7 +129,9 @@
  * ------------------------------------------------------------------------- */
 #define E22_CMD_WRITE_SAVED 0xC0U   /* Kalici (flash) yazma: C0 addr len vals... */
 #define E22_CMD_READ        0xC1U   /* Secmeli okuma: C1 addr len -> C1 addr len data... */
-#define E22_CMD_WRITE_TEMP  0xC2U   /* Kalici OLMAYAN (RAM) yazma — bu surucude KULLANILMIYOR */
+#define E22_CMD_WRITE_TEMP  0xC2U   /* Kalici OLMAYAN (RAM) yazma — G7-FIX-2 kapsaminda CRYPT'i
+                                       her boot tazelemek icin E22_WriteRegsTemp'te kullanilir
+                                       (bkz. lora.c) */
 
 /** Hatali/format-disi komutta modulun dondugu 3 byte. */
 static const uint8_t E22_RSP_BAD[3] = { 0xFFU, 0xFFU, 0xFFU };

@@ -313,9 +313,12 @@ static void E22_DumpBlock(const char *baslik, const uint8_t *blk, uint8_t len)
  *  2. E22 boot: AUX HIGH bekle
  *  3. Config moduna gir (M0=0, M1=1)
  *  4. TUM register blogunu (ADDH..CRYPT_L) C1 ile oku, hex dump'la
- *  5. ADDH..REG3 (CRYPT haric — geri okunamaz) hedefle ayniysa YAZMA
- *     (flash omru); farkliysa C0 ile yaz, yaniti dogrula, tekrar oku +
- *     dump'la
+ *  5. ADDH..REG3 (CRYPT haric — geri okunamaz) hedefle ayniysa flash'a
+ *     (C0) YAZMA yapilmaz (flash omru) — ama G7-FIX-2: bu dalda CRYPT,
+ *     C2/RAM (kalici olmayan) ile her boot yeniden yazilir (flash'taki
+ *     CRYPT git'te degistirilse bile guncellenmiyor olabilecegi kor
+ *     noktayi kapatir). Hedeften farkliysa C0 ile TAM blok (CRYPT dahil)
+ *     yazilir, yaniti dogrula, tekrar oku + dump'la
  *  6. Normal moda don
  * ========================================================================= */
 LoraStatus_t Lora_Init(LoraCtx_t *ctx, UART_HandleTypeDef *huart)

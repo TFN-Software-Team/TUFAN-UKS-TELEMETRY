@@ -5,7 +5,6 @@
  *  Duzeltmeler (v2 — NOT: 1-2. maddeler v4'te kuyruk yapisiyla
  *  tasinmistir, asagidaki v4 bolumune bakiniz):
  *  3) Telemetry_Tick: LINE_IDLE durumunda last_rx_ms sifirlanmiyordu,
- *  3) Telemetry_Tick: LINE_IDLE durumunda last_rx_ms sifirlanmiyordu,
  *     bu timeout saatini yanlis sifirliyor ve LINE_COLLECT'e girer
  *     girmez timeout'u uzatiyordu. IDLE branch'i kaldirildi.
  * 
