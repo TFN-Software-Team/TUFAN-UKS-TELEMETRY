@@ -71,7 +71,7 @@
  *                     ekip onayli kalibrasyon. Bkz. AKS SystemConfig.h
  *                     LORA_TX_PERIOD_MS ayni commit'te 500->1000 ms'e
  *                     (1 Hz'e) geri dondu) */
-#define E22_VAL_REG0        0x62U
+#define E22_VAL_REG0        0x63U
 
 /* REG1 = 0x00 = 0000 0000b
  *   bit[7:6] = 00 -> alt-paket 240 B

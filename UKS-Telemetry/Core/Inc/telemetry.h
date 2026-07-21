@@ -100,7 +100,7 @@
  * kalibre edildi (>= 3x LORA_TX_PERIOD_MS invaryanti icin bkz.
  * tools/e2e/test_contract_drift.py::
  * test_uks_tel_link_timeout_has_enough_margin_over_tx_period). */
-#define TEL_LINK_TIMEOUT_MS     4000U
+#define TEL_LINK_TIMEOUT_MS     2000U
 
 /* ========== Tipler ========== */
 
