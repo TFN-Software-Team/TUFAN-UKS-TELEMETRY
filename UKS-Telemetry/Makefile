@@ -39,7 +39,7 @@ BUILD_DIR = build
 # DIKKAT: Core/Src'ye yeni .c dosyasi eklerken BU LISTEYI de guncelle.
 # Bu dosya CubeMX (.ioc) tarafindan uretilir; CubeMX regenerate C_SOURCES'i
 # sifirlayabilir -- regenerate sonrasi elle eklenen kaynaklari (lora.c,
-# telemetry.c) geri ekleyip STM32Make.make ile diff'lemeyi unutma.
+# telemetry.c, stm32f1xx_hal_iwdg.c) geri ekleyip STM32Make.make ile diff'lemeyi unutma.
 C_SOURCES =  \
 Core/Src/main.c \
 Core/Src/stm32f1xx_it.c \
@@ -57,6 +57,7 @@ Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_pwr.c \
 Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_flash.c \
 Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_flash_ex.c \
 Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_exti.c \
+Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_iwdg.c \
 Core/Src/system_stm32f1xx.c \
 Core/Src/sysmem.c \
 Core/Src/syscalls.c \
