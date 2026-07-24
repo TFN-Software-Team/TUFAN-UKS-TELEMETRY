@@ -2,7 +2,7 @@
 
 > ⚠️ Yönetmelik 9.2 uyumu ve UKS/AKS kanal ayrımı için bkz. [UYUM_NOTU.md](./UYUM_NOTU.md).
 
-**Repo:** `TFN-Software-Team/TUFAN-UKS-TELEMETRY` · **Branch:** `ravza`
+**Repo:** `TFN-Software-Team/TUFAN-UKS-TELEMETRY` · **Branch:** `main`
 **MCU:** STM32F103 (Cortex-M3) · **HAL:** STM32 HAL (RTOS yok, bare-metal ana döngü)
 **Görev:** TUFAN elektrikli araç projesinde, aracın (AKS) gönderdiği telemetriyi alıp ekrana basan yer istasyonu. Yönetmelik 9.2.a gereği RF hattı **tek yönlüdür**: UKS → AKS yönünde yalnızca stabilizasyon teyidi amaçlı 0xB0 heartbeat'i gönderilir, komut kanalı yoktur (bkz. [UYUM_NOTU.md](./UYUM_NOTU.md)).
 
@@ -162,7 +162,7 @@ TEL,ver,seq,rpm,torque,motorErr,motorValid,motorTimeout,cellVMax,cellVMin,
 
 | Alan | Madde | Not |
 |---|---|---|
-| `tempH` | 9.2.c.ii ("en yüksek batarya sıcaklığı") | Solion BMS bu değeri donanımda hesaplayıp veriyor; AKS yalnızca pass-through yapar |
+| `tempH` | 9.2.c.ii ("en yüksek batarya sıcaklığı") | Lithium Balance cBMS bu değeri donanımda hesaplayıp veriyor; AKS yalnızca pass-through yapar |
 | `packV` | 9.2.c.iv | — |
 | `spd_x10` | 9.2.c.i | — |
 | `ts_ms` | 9.2.h | — |
@@ -210,7 +210,7 @@ Hem `rx_ring` hem `frame_q` **tek-üretici/tek-tüketici** olduğu için kritik 
 
 `Parse_Int`, işaretli ondalık tamsayı parser'ı. Son hane kontrolü dahil taşma-güvenli: `v == 214748364 && digit > 7` durumunda erken reddeder — aksi halde `v*10+digit` signed long overflow'a (UB) yol açabilirdi.
 
-`Decode_Line` her alanı hem format hem sanity aralığına göre doğrular (örn. RPM ≤ 20000, SOC ≤ 100, sıcaklık -40..120°C). Tag (`TEL`) ve protokol versiyonu da ayrıca kontrol edilir.
+`Decode_Line` her alanı format + tip aralığına göre doğrular: `soc` 0..10000 (`Parse_Int` sınırı, ×0.01% — %0.00..%100.00), `tempH`/`tempL` -128..127°C (`Parse_Int` sınırı). Bunların dışında yalnızca RPM için ayrı bir sanity eşiği vardır ve aşımı `range_fail` sayacına yazılır (RPM ≤ `TEL_RPM_MAX`=20000); SOC/sıcaklık için `range_fail`'e giden ayrı bir eşik yoktur — tip sınırı dışına çıkan değerler `Parse_Int` reddiyle `parse_fail` sayılır. Tag (`TEL`) ve protokol versiyonu da ayrıca kontrol edilir.
 
 ### İstatistikler ve dashboard
 

@@ -78,4 +78,5 @@ AKS tarafında `lib/E22Config` + boot dizisiyle uygulanıyor — E32'ye özgü
 
 > **Not:** Bu dosyada daha önce "Elektromobil Güvenlik Kontrol Sistemi"
 > adlı, bu firmware ile ilgisiz eski bir konsol demosu placeholder olarak
-> duruyordu. Arşiv amaçlı [`docs/legacy/elektromobil-guvenlik-demo.md`](../docs/legacy/elektromobil-guvenlik-demo.md)'ye taşındı.
+> duruyordu. Bu firmware ile hiçbir ilişkisi olmadığı ve juri karışıklığına
+> yol açabileceği için repodan tamamen kaldırıldı.

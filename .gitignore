@@ -69,5 +69,8 @@ Thumbs.db
 *.log
 *.out
 
+# Local toolchain paths (machine-specific — bkz. UKS-Telemetry/.stm32env.example)
+.stm32env
+
 # Stray/duplicate nested project copy (accidental nested clone/extract)
 UKS-Telemetry/UKS-Telemetry/

@@ -560,6 +560,65 @@ LoraStatus_t Lora_Send(LoraCtx_t *ctx, const uint8_t *data, uint16_t len)
     return Lora_TxSafe(ctx, data, len, /*block_aux=*/1U, /*tx_to=*/1000U);
 }
 
+/* =========================================================================
+ * UKS-05: heartbeat'e ozel TX kisayolu — devam eden IT-RX'i OLDURMEZ.
+ *
+ * Lora_TxSafe (dolayisiyla Lora_Send), her TX'ten once devam eden IT-RX'i
+ * HAL_UART_AbortReceive ile durdurup TX sonrasi Lora_StartReceive ile
+ * yeniden arm eder. Bu abort->transmit->rearm penceresi ~1 ms surer ve bu
+ * pencerede USART2 RX KAPALIDIR. Heartbeat 1 Hz'de gonderildigi ve AKS
+ * telemetrisi bu pencereye rastgele denk gelebildigi icin, o anda gelen
+ * herhangi bir bayt donanimda kaybolur -> satir bozulur -> Decode_Line
+ * parse_fail -> o frame'in TUM alanlari gider. Belirti RF gurultusune
+ * benzedigi icin kok neden gizli kalir.
+ *
+ * STM32F103 USART'i tam dubleks (ayri TX/RX pin ve shift register'lari);
+ * AbortReceive/StartReceive protokol geregi degil, sadece HAL'in
+ * __HAL_LOCK mekanizmasindan kaynaklanan bir kisitlamadir. Tek baytlik
+ * heartbeat icin HAL'i atlayip dogrudan register'a yazmak RX durum
+ * makinesine HIC dokunmadan (AbortReceive/StartReceive YOK) TX yapar.
+ *
+ * SADECE tek-bayt heartbeat icindir. Cok baytli TX yolu (bugun 9.2.a
+ * geregi heartbeat disinda TX yok) Lora_Send/Lora_TxSafe uzerinden
+ * DEGISMEDEN kalir.
+ *
+ * Geri alma: bu fonksiyon ve main.c'deki cagrı noktasi TEK commit'te.
+ * Sorun cikarsa `git revert <bu-commit-hash>` heartbeat'i eski
+ * Lora_Send yoluna geri dondurur.
+ * ========================================================================= */
+LoraStatus_t Lora_SendHeartbeatFast(LoraCtx_t *ctx, uint8_t byte)
+{
+    if (!ctx || !ctx->huart) return LORA_ERR;
+
+    /* AUX kapisi — Lora_TxSafe(block_aux=1) ile AYNI marj (200 ms):
+     * modul mesgulse (RX/TX aninda) sessizce atla. */
+    if (E22_WaitAuxHigh(200U) != LORA_OK)
+        return LORA_ERR_BUSY;
+
+    /* RX durum makinesine (rx_active, IT-RX arm durumu) HIC DOKUNMA. */
+    USART_TypeDef *u = ctx->huart->Instance;
+
+    uint32_t start = HAL_GetTick();
+    while (!(u->SR & USART_SR_TXE))
+    {
+        if ((HAL_GetTick() - start) >= 50U)
+            return LORA_ERR_TIMEOUT;
+    }
+    u->DR = byte;
+
+    /* TC (Transmission Complete) bekle — HAL_UART_Transmit'in bloklayan
+     * davranisiyla tutarli: donus, bayt fiilen hat uzerine cikmadan
+     * olmaz. */
+    start = HAL_GetTick();
+    while (!(u->SR & USART_SR_TC))
+    {
+        if ((HAL_GetTick() - start) >= 50U)
+            return LORA_ERR_TIMEOUT;
+    }
+
+    return LORA_OK;
+}
+
 void Lora_OnUartRxCplt(LoraCtx_t *ctx, UART_HandleTypeDef *huart)
 {
     if (!ctx || ctx->huart != huart) return;

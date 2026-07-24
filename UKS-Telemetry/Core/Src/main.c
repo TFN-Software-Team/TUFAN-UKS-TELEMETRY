@@ -44,12 +44,17 @@
 /* ========== Donanim Handle'lari ========== */
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
+IWDG_HandleTypeDef hiwdg;
+
+/* Error_Handler kac kez cagirildi — kalici kilit yerine IWDG reset bekler. */
+static volatile uint32_t error_handler_count = 0;
 
 /* ========== Sistem Durumu ========== */
 TelCtx_t           tel_ctx;
 static LoraCtx_t   lora_ctx;
 
 static uint32_t         last_heartbeat_ms = 0;
+static uint32_t         last_hb_stat_ms = 0;   /* UKS-03: 10 sn'de bir STAT, satiri */
 
 /* Heartbeat TX (0xB0) — UYUM_NOTU.md bolum 2: madde 9.2.a'nin izin verdigi
  * stabilizasyon-teyidi geri bildirimi. RF hattindaki TEK TX kaynagidir. */
@@ -60,6 +65,14 @@ static uint32_t         last_heartbeat_tx_ms = 0;
 static uint32_t         last_valid_tel_tick = 0;
 static uint8_t          link_down = 0;
 
+/* Boot grace: acilista (RX dinlemeye basladiktan sonra) hic frame
+ * gelmemisse, normal TEL_LINK_TIMEOUT_MS mantigi last_valid_tel_tick'in
+ * 0 olmasi yuzunden HICBIR ZAMAN tetiklenmezdi -> AKS hic yayin
+ * yapmiyorken bile "LINK,DOWN" asla basilmazdi. Bu ayri, tek seferlik
+ * grace suresi bu kor noktayi kapatir. */
+#define TEL_BOOT_GRACE_MS   5000U
+static uint32_t         listen_start_ms = 0;
+
 /* FIX-C: dashboard throttle — her DASH_EVERY_N frame'de bir bas */
 #define DASH_EVERY_N   3U
 static uint32_t         dash_frame_counter = 0;
@@ -69,6 +82,7 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_IWDG_Init(void);
 
 /* ====================================================================
  * BUG #4 / FIX-B: printf → USART1 yonlendirmesi.
@@ -123,12 +137,17 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
  * ==================================================================== */
 int main(void)
 {
+    /* Reset nedenini IWDG init'ten (RCC_CSR sifirlamasindan) ONCE oku. */
+    uint8_t was_iwdg_reset = (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST) != 0U) ? 1U : 0U;
+    __HAL_RCC_CLEAR_RESET_FLAGS();
+
     HAL_Init();
     SystemClock_Config();
 
     MX_GPIO_Init();
     MX_USART1_UART_Init();
     MX_USART2_UART_Init();
+    MX_IWDG_Init();
 
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -139,6 +158,8 @@ int main(void)
     printf("    Saat      : HSI 8 MHz (PLL yok)\r\n");
     printf("    Monitor   : USART1 115200 baud\r\n");
     printf("    LoRa UART : USART2 9600 baud\r\n");
+    if (was_iwdg_reset)
+        printf("    ONCEKI RESET: IWDG (watchdog karti resetledi)\r\n");
     /* Boot mesaji e22_regs.h HEDEF degerlerinden turetilir — hicbir sayi
      * burada ayrica hardcode edilmez (bkz. e22_regs.h decode yardimcilari). */
     {
@@ -192,10 +213,17 @@ int main(void)
 
     printf("\r\n--- AKS telemetri bekleniyor ---\r\n\r\n");
 
+    /* Boot grace sayaci burdan itibaren isler — RX fiilen dinlemeye
+     * basladiktan sonra (Lora_Init/StartReceive tamamlandi). */
+    listen_start_ms = HAL_GetTick();
+
     /* ---- Ana dongu ---- */
     while (1)
     {
         uint32_t now = HAL_GetTick();
+
+        /* IWDG SADECE ana donguden beslenir — ISR icinden BESLEME. */
+        HAL_IWDG_Refresh(&hiwdg);
 
         /* Heartbeat TX (0xB0): AKS'e periyodik "canliyim" sinyali.
          * Best-effort — basarisizsa sessizce atlanir ve bir sonraki
@@ -204,20 +232,43 @@ int main(void)
         {
             last_heartbeat_tx_ms = now;
 
-            uint8_t hb = LORA_HEARTBEAT_BYTE;
-            (void)Lora_Send(&lora_ctx, &hb, 1U);
+            /* UKS-05: Lora_Send DEGIL — Lora_SendHeartbeatFast. Lora_Send
+             * (Lora_TxSafe uzerinden) TX icin devam eden IT-RX'i abort
+             * edip yeniden arm ediyor; bu ~1 ms'lik pencerede USART2 RX
+             * kapaniyor ve o ana denk gelen AKS baytlari kayboluyordu
+             * (bkz. lora.c Lora_SendHeartbeatFast yorumu). Yeni yol RX
+             * durum makinesine hic dokunmadan register seviyesinde
+             * gonderir. */
+            switch (Lora_SendHeartbeatFast(&lora_ctx, LORA_HEARTBEAT_BYTE))
+            {
+                case LORA_OK:        tel_ctx.stats.hb_sent_ok++; break;
+                case LORA_ERR_BUSY:  tel_ctx.stats.hb_busy++;    break;
+                default:              tel_ctx.stats.hb_error++;   break;
+            }
         }
 
-        /* Link-down tespiti: TEL_LINK_TIMEOUT_MS suredir gecerli TEL
-         * frame'i gelmediyse baglanti kopmus sayilir. LINK,UP gecisi
-         * asagida, gecerli bir TEL_VALID frame parse edildiginde yapilir
-         * (st o noktada bilinir). */
-        if (!link_down &&
-            last_valid_tel_tick != 0U &&
-            (now - last_valid_tel_tick) > TEL_LINK_TIMEOUT_MS)
+        /* Link-down tespiti — iki durum:
+         * 1) Daha once gecerli frame alindi ama TEL_LINK_TIMEOUT_MS'tir
+         *    yenisi gelmedi -> normal kopma tespiti.
+         * 2) Acilistan (RX dinlemeye baslamadan) beri HIC gecerli frame
+         *    gelmedi (last_valid_tel_tick hala 0) -> TEL_BOOT_GRACE_MS
+         *    sonunda da DOWN bas; onceden bu durumda sonsuza kadar
+         *    sessiz kalinip dashboard'da/monitorde asla DOWN gorunmuyordu. */
+        if (!link_down)
         {
-            link_down = 1U;
-            printf("LINK,DOWN,%lu\r\n", (unsigned long)now);
+            if (last_valid_tel_tick != 0U)
+            {
+                if ((now - last_valid_tel_tick) > TEL_LINK_TIMEOUT_MS)
+                {
+                    link_down = 1U;
+                    printf("LINK,DOWN,%lu\r\n", (unsigned long)now);
+                }
+            }
+            else if ((now - listen_start_ms) > TEL_BOOT_GRACE_MS)
+            {
+                link_down = 1U;
+                printf("LINK,DOWN,%lu\r\n", (unsigned long)now);
+            }
         }
 
         /* Heartbeat: her 3 saniyede istatistik bas */
@@ -240,14 +291,32 @@ int main(void)
             }
 
             const TelStats_t *s = Telemetry_GetStats(&tel_ctx);
-            printf("[HB] t=%lu ms | rx_byte=%lu  good=%lu  bad=%lu  gap=%lu\r\n",
+            printf("[HB] t=%lu ms | rx_byte=%lu  good=%lu  bad=%lu  gap=%lu  "
+                   "| hbTX ok=%lu busy=%lu err=%lu\r\n",
                    (unsigned long)now,
                    (unsigned long)s->rx_bytes,
                    (unsigned long)s->good_packets,
                    (unsigned long)(s->parse_fail + s->bad_tag +
                                    s->bad_version + s->range_fail +
                                    s->ring_overflow + s->timeout_drop),
-                   (unsigned long)s->seq_gaps);
+                   (unsigned long)s->seq_gaps,
+                   (unsigned long)s->hb_sent_ok,
+                   (unsigned long)s->hb_busy,
+                   (unsigned long)s->hb_error);
+        }
+
+        /* Heartbeat TX istatistigi — ayri, 10 saniyede bir "STAT," onekli
+         * satir. "CSV," ile BASLAMAZ ki Monitor'un CSV semasini bozmasin;
+         * Monitor bilinmeyen onekleri events log'a dusurur. */
+        if ((now - last_hb_stat_ms) >= 10000U)
+        {
+            last_hb_stat_ms = now;
+            const TelStats_t *hs = Telemetry_GetStats(&tel_ctx);
+            printf("STAT,%lu,%lu,%lu,%lu\r\n",
+                   (unsigned long)now,
+                   (unsigned long)hs->hb_sent_ok,
+                   (unsigned long)hs->hb_busy,
+                   (unsigned long)hs->hb_error);
         }
 
         /* FIX (v3): Ring buffer'daki ham byte'lari ISLE.
@@ -259,8 +328,16 @@ int main(void)
         /* Yarim satir timeout kontrolu */
         Telemetry_Tick(&tel_ctx, now);
 
-        /* Hazir frame varsa: her zaman PARSE et, ekrani throttle'la bas */
-        if (Telemetry_IsFrameReady(&tel_ctx))
+        /* Kuyrukta bekleyen TUM frame'leri bu tikte bosalt (eskiden tek
+         * frame/tik islenirdi — `if`; kuyruk derinligi kadar biriken
+         * frame'ler sonraki tiklere sarkip queue_overflow_drop'u
+         * tetikleyebiliyordu). Sonsuz donguye karsi ust sinir:
+         * TEL_FRAME_Q_DEPTH yinelemede kuyruk zaten bosalmis olmali;
+         * boylece ISR/Process arka planda surekli doldursa bile bu tik
+         * sonsuza kadar burada takilmaz. */
+        for (uint8_t frame_iter = 0U;
+             frame_iter < TEL_FRAME_Q_DEPTH && Telemetry_IsFrameReady(&tel_ctx);
+             frame_iter++)
         {
             TelData_t   d;
             TelStatus_t st = Telemetry_Parse(&tel_ctx, &d);
@@ -291,7 +368,8 @@ int main(void)
             /* FIX-C: dashboard ciktisini seyrelt — RX'e nefes alani */
             if ((++dash_frame_counter % DASH_EVERY_N) == 0U)
             {
-                Telemetry_PrintDashboard(&d, st, link_down);
+                const TelStats_t *qs = Telemetry_GetStats(&tel_ctx);
+                Telemetry_PrintDashboard(&d, st, link_down, qs->queue_overflow_drop);
             }
         }
     }
@@ -330,6 +408,29 @@ static void MX_USART2_UART_Init(void)
     huart2.Init.HwFlowCtl    = UART_HWCONTROL_NONE;
     huart2.Init.OverSampling = UART_OVERSAMPLING_16;
     if (HAL_UART_Init(&huart2) != HAL_OK) Error_Handler();
+}
+
+/* ====================================================================
+ * IWDG — bagimsiz watchdog, ~4 saniye timeout.
+ * LSI ~40 kHz (kalibrasyonsuz iç osilator; IWDG icin onemsiz — timeout
+ * mahsus genis tutuldu).
+ * Tick periyodu = Prescaler / LSI = 64 / 40000 = 1.6 ms
+ * Timeout      = Tick * (Reload+1) = 1.6 ms * 2500 = 4000 ms = 4 s
+ *
+ * Normal dongu suresi (heartbeat TX + stats + Telemetry_Process/Tick +
+ * throttle'li dashboard basimi) ~60 ms mertebesinde — 4 s'ye buyuk marj
+ * var. Bkz. main() sonundaki not: dongu icindeki en uzun potansiyel
+ * blok, USART1 fiziksel olarak tikanirsa __io_putchar'in 200 ms'lik
+ * per-byte timeout'u yuzunden pathological olarak uzayabilir — bu,
+ * IWDG'nin YAKALAMASI GEREKEN durumdur, bu yuzden dashboard icine ayrica
+ * besleme EKLENMEDI.
+ * ==================================================================== */
+static void MX_IWDG_Init(void)
+{
+    hiwdg.Instance       = IWDG;
+    hiwdg.Init.Prescaler = IWDG_PRESCALER_64;
+    hiwdg.Init.Reload    = 2499U; /* (Reload+1)=2500 -> ~4.0 s @ LSI 40 kHz */
+    if (HAL_IWDG_Init(&hiwdg) != HAL_OK) Error_Handler();
 }
 
 /* ====================================================================
@@ -381,8 +482,19 @@ void SystemClock_Config(void)
     if (HAL_RCC_ClockConfig(&c, FLASH_LATENCY_0) != HAL_OK) Error_Handler();
 }
 
+/* ====================================================================
+ * Error_Handler — ONCEDEN: __disable_irq(); while(1){} ile KALICI kilit;
+ * tek bir HAL hatasi karti tamamen susturuyordu, yalniz guc cevrimi
+ * kurtariyordu (madde 14).
+ * SIMDI: hatayi sayar, USART1'e tek satirlik mesaj basar (IRQ'lar acik
+ * kaldigi icin HAL_UART_Transmit calisir) ve IWDG'yi BESLEMEDEN donguye
+ * girer -> kart ~4 s icinde watchdog ile kendini resetler.
+ * ==================================================================== */
 void Error_Handler(void)
 {
-    __disable_irq();
-    while (1) { }
+    error_handler_count++;
+    printf("\r\n!! HAL HATA #%lu -- IWDG reset bekleniyor !!\r\n",
+           (unsigned long)error_handler_count);
+
+    while (1) { } /* IWDG BESLENMEZ — kart ~4 s icinde reset atar. */
 }

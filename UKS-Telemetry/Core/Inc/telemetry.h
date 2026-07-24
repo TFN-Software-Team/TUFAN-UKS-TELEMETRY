@@ -78,11 +78,17 @@
 #define TEL_RX_RING_MASK        (TEL_RX_RING_SIZE - 1U)
 
 /* Decode edilmis frame kuyrugu derinligi. 2'nin kuvveti olmali (maske ile
- * sarma). AKS tarafi link flapping duzeltmesiyle 5 Hz'den 2 Hz'e indi
- * (LORA_TX_PERIOD_MS=500, bkz. AKS SystemConfig.h); nominal frame araligi
- * ~500 ms, en kotu bloklama (dashboard) ~60 ms → pratikte 1 frame bile
- * birikmiyor; 4 rahat marj birakir. */
-#define TEL_FRAME_Q_DEPTH       4U
+ * sarma). SPSC "dolu" testi (head+1==tail) bir slotu hep bos birakir,
+ * yani kullanilabilir derinlik DEPTH-1'dir. AKS nominal 2 Hz gonderirken
+ * (~500 ms araliklarla) tek basina 4 (kullanilabilir 3) yeterli gorunse
+ * de replay/yogun-anlarda birden fazla kucuk frame ayni ana dongu turuna
+ * denk gelebilir; 8'e (kullanilabilir 7) cikarildi — main.c artik
+ * kuyrugu tikte TAMAMEN bosaltiyor (bkz. main.c ana dongu, while +
+ * ust sinir), bu yuzden buyutulen derinlik kalici birikime degil sadece
+ * ani patlamalara marj saglar. RAM maliyeti: sizeof(TelData_t)=44 B ×
+ * (8-4)=4 ekstra slot = +176 B (toplam frame_q = 352 B); STM32F103xB'nin
+ * 20 KB RAM'inde onemsiz (bkz. proje derleme cikisindaki .data+.bss). */
+#define TEL_FRAME_Q_DEPTH       8U
 #define TEL_FRAME_Q_MASK        (TEL_FRAME_Q_DEPTH - 1U)
 
 /* Sanity araliklari (parser'da hard reject) */
@@ -167,6 +173,12 @@ typedef struct {
     uint32_t good_packets;
     uint32_t seq_gaps;         /* Beklenenin uzerinde atlama */
     uint32_t seq_dup_or_stale; /* Ayni veya geri giden sira */
+
+    /* Heartbeat TX (0xB0) sonuc sayaclari — main.c Lora_Send donus
+     * degerini burada takip eder (bkz. main.c ana dongu). */
+    uint32_t hb_sent_ok;       /* Lora_Send LORA_OK dondu */
+    uint32_t hb_busy;          /* LORA_ERR_BUSY — AUX 200 ms icinde HIGH gelmedi */
+    uint32_t hb_error;         /* LORA_ERR / LORA_ERR_TIMEOUT */
 } TelStats_t;
 
 typedef struct {
@@ -226,7 +238,8 @@ void              Telemetry_ResetStats(TelCtx_t *ctx);
 
 void              Telemetry_PrintDashboard(const TelData_t *data,
                                            TelStatus_t status,
-                                           uint8_t link_down);
+                                           uint8_t link_down,
+                                           uint32_t queue_overflow_drop);
 void              Telemetry_PrintStats    (const TelCtx_t *ctx);
 
 #endif /* TELEMETRY_H */

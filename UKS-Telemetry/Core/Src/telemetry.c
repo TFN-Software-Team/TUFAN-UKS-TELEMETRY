@@ -521,13 +521,15 @@ static const char *SysState_Str(uint8_t st)
 }
 
 void Telemetry_PrintDashboard(const TelData_t *d, TelStatus_t status,
-                              uint8_t link_down)
+                              uint8_t link_down, uint32_t queue_overflow_drop)
 {
     printf("\r\n");
     printf("  +============================================+\r\n");
     printf("  |        UKS YER ISTASYONU TELEMETRI         |\r\n");
     printf("  +============================================+\r\n");
     printf("  |  LINK: %-36s|\r\n", link_down ? "DOWN" : "OK");
+    printf("  |  Kuyruk overflow: %-26lu|\r\n",
+           (unsigned long)queue_overflow_drop);
 
     if (status == TEL_NO_DATA || !d)
     {

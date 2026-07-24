@@ -85,6 +85,16 @@ LoraStatus_t Lora_StartReceive(LoraCtx_t *ctx);
  */
 LoraStatus_t Lora_Send        (LoraCtx_t *ctx, const uint8_t *data, uint16_t len);
 
+/**
+ * @brief  UKS-05: tek-bayt heartbeat icin TX yolu — devam eden IT-RX'i
+ *         AbortReceive/StartReceive ile durdurup-yeniden-armadigi icin
+ *         Lora_Send'in aksine RX penceresini kapatmaz (bkz. lora.c yorumu).
+ *         SADECE tek bayt icindir; cok baytli TX icin Lora_Send kullanilir.
+ * @retval LORA_ERR_BUSY    AUX 200 ms icinde HIGH gelmedi (modul mesgul)
+ *         LORA_ERR_TIMEOUT TXE/TC 50 ms icinde gelmedi (donanim sorunu)
+ */
+LoraStatus_t Lora_SendHeartbeatFast(LoraCtx_t *ctx, uint8_t byte);
+
 /** HAL_UART_RxCpltCallback icinden cagrilmali. */
 void Lora_OnUartRxCplt(LoraCtx_t *ctx, UART_HandleTypeDef *huart);
 
