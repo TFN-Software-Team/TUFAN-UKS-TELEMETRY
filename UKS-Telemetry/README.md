@@ -27,7 +27,7 @@ TEL,ver,seq,rpm,torque,motorErr,motorValid,motorTimeout,cellVMax,cellVMin,
 | 9 | `cellVMin` | uint16 | ×0.1 mV | 0..65535 | En düşük hücre voltajı |
 | 10 | `tempH` | int16 (kaynak int8) | °C | -128..127 | En yüksek BMS sıcaklığı |
 | 11 | `tempL` | int16 (kaynak int8) | °C | -128..127 | En düşük BMS sıcaklığı |
-| 12 | `sysState` | uint8 | enum | 1..4 | 1=Discharge 2=IDLE 3=Charge 4=FAULT |
+| 12 | `sysState` | uint8 | enum | 1..4 | **Bataryanın çalışma modu** (BMS sağlığı DEĞİL): 1=Deşarj 2=Boşta 3=Şarj. AKS **4 (FAULT) ÜRETMEZ** — Y33, aşağıya bkz. |
 | 13 | `packV` | uint16 | ×0.1 V | 0..65535 | Pack voltajı |
 | 14 | `current` | int32 | ×0.01 A (centi-Amper) | -2147483647..2147483647 | Pack akımı (+şarj / -deşarj) |
 | 15 | `soc` | uint16 | ×0.01 % | 0..10000 (10000=%100.00) | Şarj durumu |

@@ -150,7 +150,7 @@ TEL,ver,seq,rpm,torque,motorErr,motorValid,motorTimeout,cellVMax,cellVMin,
 | 9 | `cellVMin` | uint16 | ×0.1 mV | 0..65535 | En düşük hücre voltajı |
 | 10 | `tempH` | int16 (kaynak int8) | °C | -128..127 | En yüksek BMS sıcaklığı |
 | 11 | `tempL` | int16 (kaynak int8) | °C | -128..127 | En düşük BMS sıcaklığı |
-| 12 | `sysState` | uint8 | enum | 1..4 | 1=Discharge 2=IDLE 3=Charge 4=FAULT |
+| 12 | `sysState` | uint8 | enum | 1..4 | **Bataryanın çalışma modu** (BMS sağlığı DEĞİL): 1=Deşarj 2=Boşta 3=Şarj. AKS **4 (FAULT) ÜRETMEZ** — Y33, aşağıya bkz. |
 | 13 | `packV` | uint16 | ×0.1 V | 0..65535 | Pack voltajı |
 | 14 | `current` | int32 | ×0.01 A (centi-Amper) | -2147483647..2147483647 | Pack akımı (+şarj / -deşarj) |
 | 15 | `soc` | uint16 | ×0.01 % | 0..10000 (10000=%100.00) | Şarj durumu |
@@ -328,7 +328,8 @@ Beklenen çıktı: `55 checks, 0 failures`.
 - **M0/M1 donanım bağlantısı doğrulandı:** Ravza, M0/M1'in STM32'ye (PB6/PB7) bağlı olduğunu fiziksel olarak teyit etti; `main.h` ve kod tabanı bununla tutarlı.
 - **AKS tarafı config-on-boot — ARTIK VAR:** Önceki bilinen boşluk ("production AKS firmware'inde config yazımı yoktur") güncelliğini yitirdi. AKS artık boot'ta kendi E22 modülünü konfigüre ediyor (`vTask_LoRa_UKS` boot sırası + `lib/E22Config`, ESP_AKS commit `0caa38b`). UKS (`e22_regs.h`) ve AKS (`E22Config`) tarafındaki register hedef değerlerinin **birebir aynı** olduğu 2026-07-15'te bench dump ile çapraz doğrulandı — bkz. §3 doğrulama notu.
 - **E32 → E22 migrasyonu GERÇEKLEŞTİ (iki tarafta da):** Donanım E32-433T30D'den E22-400T30D-V2'ye (SX1268, 30 dBm) geçirildi; register-tabanlı `C0`/`C1` config protokolü, farklı config-modu pin seviyeleri (M0=0,M1=1) ve register haritası `Core/Inc/e22_regs.h`'de tek doğruluk kaynağı olarak tanımlı (bkz. §3). Karşı uçtaki AKS (ESP32) da E22'ye geçti (`lib/E22Config`). Register haritası 2026-07-15'te bench dump ile **doğrulandı** (bkz. §3 doğrulama notu, AKS `Documents/BENCH_E22_TEYIT.md` "Sonuç Kaydı").
-- **VCU state alanı planlı, henüz yok:** AKS telemetri paketine VCU durumu eklenmesi planlanıyor — bu, protokol versiyon bump'ı ve UKS parser'ında koordineli güncelleme gerektirecek (19 alan kuralını bozmadan).
+- **VCU state alanı planlı, henüz yok:** AKS telemetri paketine **VCU durumu** (aracın durum makinesi: IDLE/READY/DRIVE/…) eklenmesi planlanıyor — bu, protokol versiyon bump'ı ve UKS parser'ında koordineli güncelleme gerektirecek (19 alan kuralını bozmadan).
+  > ⚠️ **Karıştırmayın:** 12. alan olan `sysState` bu DEĞİLDİR. `sysState`, **bataryanın çalışma modunu** taşır (1=Deşarj, 2=Boşta, 3=Şarj — AKS'te doğrulanmış akımdan türetilir, Y33). Aracın VCU durumu şu an telemetride HİÇ yok.
 
 ---
 

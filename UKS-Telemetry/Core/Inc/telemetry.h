@@ -139,7 +139,10 @@ typedef struct {
     uint8_t   motor_data_valid;
     uint8_t   motor_timeout_active;
 
-    /* BMS (Solion SK BMS uyumlu — ESP_AKS Telemetry.h v2 alan bolunmesi) */
+    /* BMS — Lithium Balance cBMS24 (ESP_AKS Telemetry.h v2 alan bolunmesi).
+     * NOT (Y48): burada eskiden "Solion SK BMS uyumlu" yaziyordu; bu gecmisten
+     * kalan bir HATAYDI. Donanim vendoru 2026-07-03'te Solion SK'dan Lithium
+     * Balance'a gecti ve bu satir guncellenmeden kalmisti. */
     uint16_t  bms_cell_vmax_decimv;   /* x0.1 mV */
     uint16_t  bms_cell_vmin_decimv;   /* x0.1 mV */
     int16_t   bms_temp_highest_c;     /* derece C (kaynak int8, burada int16) */
