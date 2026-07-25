@@ -16,7 +16,11 @@
  *        motorValid/Timeout  0/1
  *        cellVMax/Min   uint16, x0.1 mV
  *        tempH/tempL    int8 kaynak (burada int16 saklanir), derece C
- *        sysState       uint8, 1=Discharge 2=IDLE 3=Charge 4=FAULT
+ *        sysState       uint8, 1=Desarj 2=Bosta 3=Sarj 4=FAULT (kabul araligi
+ *                       1..4 — DEGISMEDI). AKS Y33 karari (24.07.2026): alan
+ *                       BMS SAGLIGINI degil, BATARYA CALISMA MODUNU tasir ve
+ *                       AKS artik 4 (FAULT) URETMEZ. "BMS verisi yok" bilgisi
+ *                       bu alandan DEGIL, asagidaki bmsValid alanindan okunur.
  *        packV          uint16, x0.1 V
  *        current        int32,  x0.01 A (centi-Amper) (+sarj / -desarj)
  *                       (ONCEDEN birim yanlislikla 1000 kat kucuk yaziliyordu
@@ -140,7 +144,11 @@ typedef struct {
     uint16_t  bms_cell_vmin_decimv;   /* x0.1 mV */
     int16_t   bms_temp_highest_c;     /* derece C (kaynak int8, burada int16) */
     int16_t   bms_temp_lowest_c;      /* derece C */
-    uint8_t   bms_system_state;       /* 1=Discharge 2=IDLE 3=Charge 4=FAULT */
+    /* Batarya CALISMA MODU (BMS sagligi DEGIL — AKS Y33, 24.07.2026):
+     * 1=Desarj 2=Bosta 3=Sarj. AKS 4 (FAULT) URETMEZ; etiket yalnizca
+     * ileride gercek bir BMS-durum kaynagi baglanirsa diye korunuyor.
+     * Kabul araligi 1..4 DEGISMEDI (bkz. Decode_Line Parse_Int(f[12],1,4)). */
+    uint8_t   bms_system_state;
     uint16_t  bms_pack_voltage_deciv; /* x0.1 V */
     /* NOT: alan adi "centima" (centi-mA cagristirir) ama gercek birim
      * centi-Amper (0.01 A) — AKS TEL_bmsCurrentCentiA ile AYNI. Alan ADI

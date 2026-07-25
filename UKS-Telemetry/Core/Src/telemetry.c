@@ -508,13 +508,31 @@ static const char *Status_Str(TelStatus_t s)
     }
 }
 
+/* sysState (TEL alan 12) -> ekran metni.
+ *
+ * AKS tarafi Y33 karari (24.07.2026) ile bu alanin ANLAMINI netlestirdi:
+ * BMS'in SAGLIK durumunu (OK/FAULT) yayinladigi bir CAN ID'ye ULASILAMADI ve
+ * aranmayacak. Alan artik BMS sagligini degil, DOGRULANMIS akimdan turetilen
+ * BATARYA CALISMA MODUNU tasiyor (1=Desarj 2=Bosta 3=Sarj).
+ *
+ * Onceki durumda alan hicbir kaynaktan beslenmedigi icin AKS sanitizer'i onu
+ * FAULT(4) yapiyordu ve bu panelde BMS DAIMA "FAULT" gorunuyordu — ortada
+ * gercek bir ariza olmadigi halde. AKS artik 4 URETMEZ.
+ *
+ * 4 = FAULT etiketi yine de KORUNDU: ileride gercek bir BMS-durum CAN ID'si
+ * bulunursa (AKS tarafinda E032/E033 teyidi) deger buraya gelebilir ve
+ * sessizce "UNK" gostermek yaniltici olurdu.
+ *
+ * "BMS verisi yok" durumu BU ALANDAN OKUNMAZ — ayri bir alan (bms_data_valid,
+ * TEL alan 16) tasir; bkz. Telemetry_PrintDashboard'daki kullanim.
+ */
 static const char *SysState_Str(uint8_t st)
 {
     switch (st)
     {
-        case 1: return "DISCHARGE";
-        case 2: return "IDLE";
-        case 3: return "CHARGE";
+        case 1: return "DESARJ";
+        case 2: return "BOSTA";
+        case 3: return "SARJ";
         case 4: return "FAULT";
         default: return "UNK";
     }
@@ -552,9 +570,30 @@ void Telemetry_PrintDashboard(const TelData_t *d, TelStatus_t status,
            (unsigned)d->motor_error_flags,
            (unsigned)d->motor_data_valid,
            (unsigned)d->motor_timeout_active);
+    /* BMS baslik satiri — SIRA ONEMLI: once bms_data_valid'e bakilir.
+     * Veri taze degilse calisma modu ALANI YOK SAYILIR ve "VERI YOK" yazilir;
+     * aksi halde bayat bir akimdan turetilmis mod (or. "SARJ") CANLI veri gibi
+     * gorunurdu. AKS zaten bayat veride notr 2 gonderiyor, ama gosterim
+     * tarafinda da ayni dururlugu saglamak icin kapi BURADA da var. */
     printf("  |--- BMS (%-9s, V:%u) ----------------|\r\n",
-           SysState_Str(d->bms_system_state),
+           d->bms_data_valid ? SysState_Str(d->bms_system_state) : "VERI YOK",
            (unsigned)d->bms_data_valid);
+
+    /* BAYAT VERI GOSTERIMI: bms_data_valid==0 iken BMS sayisal alanlari son
+     * gorulen degerleri tutar. Bunlari oldugu gibi basmak, baglanti koptugu
+     * anda ekranda DONMUS sayilari CANLI veri gibi gosterirdi — operator
+     * bataryayi izlediğini sanirken aslinda eski bir fotografa bakiyor olurdu.
+     * Bu yuzden gecersiz veride tum BMS alanlari "--" gosterir (satir
+     * genislikleri kutuyu bozmayacak sekilde birebir korunmustur). */
+    if (!d->bms_data_valid)
+    {
+        printf("  |   SoC    :      --  [--------------------] |\r\n");
+        printf("  |   Curr   :        -- A   Pack :    -- V      |\r\n");
+        printf("  |   TempH  :   -- C   TempL :   -- C             |\r\n");
+        printf("  |   CellMax:     -- mV  CellMin:     -- mV  |\r\n");
+        printf("  +============================================+\r\n\r\n");
+        return;
+    }
 
     unsigned soc_pct  = (unsigned)(d->bms_soc_hundredths / 100U);
     unsigned soc_frac = (unsigned)(d->bms_soc_hundredths % 100U);
