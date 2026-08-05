@@ -144,10 +144,18 @@ int main(void)
     HAL_Init();
     SystemClock_Config();
 
+    /* ORTA-1 FIX: IWDG artik UART init'lerden ONCE baslatiliyor.
+     * Eski sirada (GPIO -> UART1 -> UART2 -> IWDG) herhangi bir HAL init
+     * hatasi Error_Handler'a duserse, IWDG henuz baslatilmamis oldugundan
+     * while(1) dongusunden CIKIS YOKTU — kart kalici kilitleniyordu.
+     * Simdi IWDG saat konfigurasyonundan hemen sonra basliyor; boylece
+     * sonraki init adimlari basarisiz olursa Error_Handler'daki while(1)
+     * dongusunu ~4 s icinde watchdog resetler. */
+    MX_IWDG_Init();
+
     MX_GPIO_Init();
     MX_USART1_UART_Init();
     MX_USART2_UART_Init();
-    MX_IWDG_Init();
 
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -430,7 +438,12 @@ static void MX_IWDG_Init(void)
     hiwdg.Instance       = IWDG;
     hiwdg.Init.Prescaler = IWDG_PRESCALER_64;
     hiwdg.Init.Reload    = 2499U; /* (Reload+1)=2500 -> ~4.0 s @ LSI 40 kHz */
-    if (HAL_IWDG_Init(&hiwdg) != HAL_OK) Error_Handler();
+    /* ORTA-1 FIX: IWDG'nin KENDI init hatasi icin Error_Handler DEGIL,
+     * NVIC_SystemReset kullanilir. Error_Handler IWDG'yi beslemeden while(1)
+     * yapar ve IWDG'nin calismasi sartina dayanir — ama tam da IWDG init
+     * basarisiz olduysa watchdog YOK demektir, kart kalici kilitlenir.
+     * NVIC_SystemReset kosulsuz bir yeniden baslatma saglar. */
+    if (HAL_IWDG_Init(&hiwdg) != HAL_OK) NVIC_SystemReset();
 }
 
 /* ====================================================================
