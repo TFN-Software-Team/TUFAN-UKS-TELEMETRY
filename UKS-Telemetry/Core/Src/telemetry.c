@@ -279,6 +279,11 @@ static void Decode_Line(TelCtx_t *ctx, const uint8_t *buf, uint16_t len)
      * Telemetri VERISI bundan etkilenmez; yalnizca istatistik semantigi. */
     Track_Sequence(ctx, v_seq);
 
+    /* RSSI ilisiklendirme: E22 RSSI byte'i bu satirin '\n'inden hemen
+     * sonra gelir; o olcum bu frame'e aittir (bkz. Process_Byte). */
+    ctx->rssi_seq       = v_seq;
+    ctx->rssi_seq_valid = 1U;
+
     /* Kuyrukta bir sonraki bos slot'a (fq_head) yaz */
     TelData_t *d = &ctx->frame_q[ctx->fq_head];
     d->protocol_version     = (uint8_t) v_ver;
@@ -319,6 +324,31 @@ static void Process_Byte(TelCtx_t *ctx, uint8_t b, uint32_t now_ms)
 {
     ctx->last_rx_ms = now_ms;
 
+    /* RSSI byte ayiklama (E22 REG3 bit7). E22 her alinan PAKETIN sonuna
+     * 1 byte RSSI ekler; paket bir TEL satiriyla bittigi icin bu byte
+     * '\n'den hemen sonra gelir. '\n'den sonraki ilk byte:
+     *   - 'T'  -> ayni pakette yeni bir frame basliyor (RSSI paketin en
+     *             sonunda gelecek) -> normal isleme devam
+     *   - \r/\n -> satir sonu artigi -> normal isleme
+     *   - diger -> RSSI byte'i. Fiziksel olarak mumkun RSSI araligi
+     *             (~ -150..-20 dBm = 0x6A..0xEC) 'T' (0x54 = -172 dBm) ve
+     *             \r/\n ile CAKISMAZ.
+     * RSSI kapali bir modulde '\n'den sonra hep 'T' gelir — parser her
+     * iki durumda da dogru calisir (modul/firmware sirasi serbest). */
+    if (ctx->rssi_expect)
+    {
+        ctx->rssi_expect = 0U;
+        if (b != (uint8_t)TEL_TAG_STR[0] && b != '\r' && b != '\n')
+        {
+            ctx->rssi_raw        = b;
+            ctx->rssi_pending    = 1U;
+            ctx->rssi_frames     = ctx->rssi_frames_acc;
+            ctx->rssi_frames_acc = 0U;
+            ctx->stats.rssi_samples++;
+            return;
+        }
+    }
+
     /* LINE_OVERFLOW: tampon tasan bir satirin kuyruğundayiz.
      * \n gorene kadar her byte'i koşulsuz cop'e at. \n gelince
      * satir bitti, temiz bir sonraki frame'e hazirlan.
@@ -329,8 +359,10 @@ static void Process_Byte(TelCtx_t *ctx, uint8_t b, uint32_t now_ms)
     {
         if (b == '\n')
         {
-            ctx->line_len   = 0U;
-            ctx->line_state = LINE_IDLE;
+            ctx->line_len       = 0U;
+            ctx->line_state     = LINE_IDLE;
+            ctx->rssi_seq_valid = 0U;   /* tasan satir gecerli frame degil */
+            ctx->rssi_expect    = 1U;
         }
         return;   /* overflow bitmeden hicbir seyi isleme */
     }
@@ -339,10 +371,15 @@ static void Process_Byte(TelCtx_t *ctx, uint8_t b, uint32_t now_ms)
 
     if (b == '\n')
     {
+        /* Decode_Line yalniz gecerli frame'de rssi_seq_valid'i 1 yapar. */
+        ctx->rssi_seq_valid = 0U;
         if (ctx->line_len > 0U && ctx->line_state == LINE_COLLECT)
             Decode_Line(ctx, ctx->line_buf, ctx->line_len);
-        ctx->line_len   = 0U;
-        ctx->line_state = LINE_IDLE;
+        if (ctx->rssi_seq_valid && ctx->rssi_frames_acc < 0xFFU)
+            ctx->rssi_frames_acc++;
+        ctx->line_len    = 0U;
+        ctx->line_state  = LINE_IDLE;
+        ctx->rssi_expect = 1U;
         return;
     }
 
@@ -473,6 +510,27 @@ void Telemetry_Tick(TelCtx_t *ctx, uint32_t now_ms)
 }
 
 /* ========== Stats ========== */
+
+uint8_t Telemetry_TakeRssi(TelCtx_t *ctx, int16_t *dbm,
+                           uint32_t *seq, uint8_t *seq_valid)
+{
+    if (!ctx || !ctx->rssi_pending) return 0U;
+    ctx->rssi_pending = 0U;
+    if (dbm)       *dbm       = Telemetry_RssiRawToDbm(ctx->rssi_raw);
+    if (seq)       *seq       = ctx->rssi_seq;
+    if (seq_valid) *seq_valid = ctx->rssi_seq_valid;
+    return 1U;
+}
+
+uint8_t Telemetry_RssiFrameCount(const TelCtx_t *ctx)
+{
+    return ctx ? ctx->rssi_frames : 0U;
+}
+
+int16_t Telemetry_RssiRawToDbm(uint8_t raw)
+{
+    return (int16_t)((int16_t)raw - 256);
+}
 
 const TelStats_t *Telemetry_GetStats(const TelCtx_t *ctx)
 {

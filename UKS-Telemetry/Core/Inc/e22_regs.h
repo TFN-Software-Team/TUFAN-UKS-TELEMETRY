@@ -60,16 +60,20 @@
 #define E22_VAL_ADDL        0x00U   /* adres 0x0000: hedefli degil, genel/broadcast */
 #define E22_VAL_NETID       0x00U
 
-/* REG0 = 0x63 = 0110 0011b
+/* REG0 = 0x62 = 0110 0010b
  *   bit[7:5] = 011 -> UART 9600 baud (STM32 USART2 ile AYNI olmali)
  *   bit[4:3] = 00  -> 8N1, parity yok
- *   bit[2:0] = 011 -> hava hizi 4.8 kbps (AKS ile AYNI olmak ZORUNDA —
- *                     fiziksel RF parametresi, yerel degil; parkur kesfinde
- *                     maksimum mesafe 500 m olculdu, 2.4 kbps asiri tedbirdi
- *                     — ekip onayli kalibrasyon, bkz. AKS SystemConfig.h
- *                     LORA_TX_PERIOD_MS ayni commit'te 1000->500 ms'e
- *                     (2 Hz'e) geri dondu) */
-#define E22_VAL_REG0        0x63U
+ *   bit[2:0] = 010 -> hava hizi 2.4 kbps (AKS ile AYNI olmak ZORUNDA —
+ *                     fiziksel RF parametresi, yerel degil).
+ *
+ *   LINK-2K4 (2026-11): yaris gunu (AKS 4b469fb) AKS 1.2 kbps'e (0x61)
+ *   cekilmis, UKS 4.8 kbps'te (0x63) kalmisti — iki taraf ayni hizda
+ *   degildi. Iki repo AYNI commit setinde 2.4 kbps'e senkronlandi:
+ *     - 4.8 kbps'e gore ~+3 dB alici hassasiyeti (bariyer/multipath marji)
+ *     - ~107 B TEL satiri ~0.4-0.45 s havada; 1 Hz'de kanal ~%45 dolu
+ *       (1.2 kbps'te ~%75-90 idi; replay ile kanal kapasitesi asiliyordu)
+ *   AKS LORA_TX_PERIOD_MS=1000 (1 Hz), UKS TEL_LINK_TIMEOUT_MS=3000. */
+#define E22_VAL_REG0        0x62U
 
 /* REG1 = 0x00 = 0000 0000b
  *   bit[7:6] = 00 -> alt-paket 240 B
@@ -90,11 +94,25 @@
  *   bit[4] = 0 -> LBT kapali
  *   WOR bitleri kullanilmiyor
  *
- *   KRITIK — RSSI byte'i (bit7) KAPALI KALMALI: acilirsa E22 her alinan
- *   paketin sonuna 1 byte RSSI ekler; UKS satir-parser'i (telemetry.c) ve
- *   AKS komut/heartbeat RX'i bu byte'i veri sanir. Link kalitesi ileride
- *   istenirse ayri, koordineli bir is olarak yapilir. */
+ *   E22_VAL_REG3, AKS ile ORTAK (drift-guard ile kilitli) degerdir ve
+ *   bit7=0 kalir: AKS'in heartbeat RX'i paket sonuna eklenen RSSI byte'ini
+ *   "bilinmeyen byte" sayardi.
+ *
+ *   LINK-2K4 / RSSI: bit7 (RSSI byte) YEREL, yalniz ALICIYI etkileyen bir
+ *   bayraktir (havadaki paketi degistirmez). UKS bu bayragi KENDI modulunde
+ *   acar (E22_UKS_REG3_LOCAL_FLAGS) — boylece E22 her alinan paketin
+ *   sonuna 1 byte RSSI ekler; telemetry.c bu byte'i satir sonundan (\n)
+ *   hemen sonra ayiklar ve main.c onu "LQ," satiri olarak PC'ye iletir.
+ *   AKS'in modulu bit7=0'da kalir. */
 #define E22_VAL_REG3        0x00U
+
+/* UKS'e ozgu, YEREL REG3 bayraklari (AKS'e YANSITILMAZ):
+ *   bit7 = 1 -> alinan her paketin sonuna RSSI byte'i ekle.
+ * dBm = -(256 - rssi_byte)  (bkz. Telemetry_RssiRawToDbm). */
+#define E22_REG3_RSSI_BYTE_EN     0x80U
+#define E22_UKS_REG3_LOCAL_FLAGS  E22_REG3_RSSI_BYTE_EN
+/* UKS modulune gercekte yazilan / dogrulanan REG3 degeri. */
+#define E22_UKS_VAL_REG3          ((uint8_t)(E22_VAL_REG3 | E22_UKS_REG3_LOCAL_FLAGS))
 
 /* G7 — heartbeat-injection acigi kapatma: sifir-disi ortak anahtar.
  * CRYPT=0x0000 iken 433.125 MHz'deki HERHANGI bir E22 modulu 0xB0 basarsa,
@@ -114,12 +132,12 @@
  *  karsilastirmak icin. CRYPT bilerek DAHIL DEGIL (bkz. E22_REG_VERIFY_LEN). */
 #define E22_TARGET_BLOCK_INIT { \
         E22_VAL_ADDH, E22_VAL_ADDL, E22_VAL_NETID, \
-        E22_VAL_REG0, E22_VAL_REG1, E22_VAL_REG2, E22_VAL_REG3 }
+        E22_VAL_REG0, E22_VAL_REG1, E22_VAL_REG2, E22_UKS_VAL_REG3 }
 
 /** Flash'a kalici yazilacak TAM blok (CRYPT dahil, 9 byte). */
 #define E22_WRITE_BLOCK_INIT { \
         E22_VAL_ADDH, E22_VAL_ADDL, E22_VAL_NETID, \
-        E22_VAL_REG0, E22_VAL_REG1, E22_VAL_REG2, E22_VAL_REG3, \
+        E22_VAL_REG0, E22_VAL_REG1, E22_VAL_REG2, E22_UKS_VAL_REG3, \
         E22_VAL_CRYPT_H, E22_VAL_CRYPT_L }
 
 /* -------------------------------------------------------------------------

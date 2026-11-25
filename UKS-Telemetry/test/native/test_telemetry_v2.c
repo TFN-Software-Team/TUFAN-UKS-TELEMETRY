@@ -275,6 +275,154 @@ static void test_seq_above_int32_max_accepted(void)
     CHECK(s->parse_fail == 0U,   "parse_fail == 0");
 }
 
+/* ===================================================================== *
+ * LINK-2K4: E22 RSSI byte ayiklama (REG3 bit7). E22 RSSI byte'ini paketin
+ * sonuna, TEL satirinin "\r\n"inden hemen sonra ekler.
+ * ===================================================================== */
+
+#define TEL_LINE_SEQ(seq_str) \
+    "TEL,2," seq_str ",1500,-250,5,1,0,37734,37422,32,31,2,780,-181610,6283,1,123456,425"
+
+static void Feed_Raw(TelCtx_t *ctx, uint8_t b, uint32_t now_ms)
+{
+    Telemetry_RxBytePush(ctx, b, now_ms);
+    Telemetry_Process(ctx, now_ms);
+}
+
+static void Drain(TelCtx_t *ctx)
+{
+    TelData_t d;
+    while (Telemetry_IsFrameReady(ctx)) (void)Telemetry_Parse(ctx, &d);
+}
+
+static void test_rssi_byte_after_frame(void)
+{
+    printf("test_rssi_byte_after_frame...\n");
+    TelCtx_t ctx;
+    Telemetry_Init(&ctx);
+
+    Feed_Line(&ctx, TEL_LINE_SEQ("41"), 1000U);
+    Feed_Raw(&ctx, 0xA9U, 1000U);          /* 0xA9 = 169 -> -87 dBm */
+
+    CHECK(Telemetry_IsFrameReady(&ctx) != 0U, "frame ready before RSSI byte");
+    TelData_t d;
+    CHECK(Telemetry_Parse(&ctx, &d) == TEL_VALID, "frame valid");
+    CHECK(d.sequence == 41U, "seq == 41");
+
+    int16_t dbm = 0; uint32_t seq = 0; uint8_t ok = 0;
+    CHECK(Telemetry_TakeRssi(&ctx, &dbm, &seq, &ok) == 1U, "RSSI available");
+    CHECK(dbm == -87, "RSSI 0xA9 -> -87 dBm");
+    CHECK(seq == 41U && ok == 1U, "RSSI bound to seq 41");
+    CHECK(Telemetry_RssiFrameCount(&ctx) == 1U, "LQ frames == 1 (single frame packet)");
+    CHECK(Telemetry_TakeRssi(&ctx, &dbm, &seq, &ok) == 0U, "RSSI taken only once");
+
+    const TelStats_t *s = Telemetry_GetStats(&ctx);
+    CHECK(s->rssi_samples == 1U, "rssi_samples == 1");
+    CHECK(s->bad_tag == 0U && s->parse_fail == 0U, "no parse errors");
+}
+
+static void test_rssi_byte_does_not_pollute_next_frame(void)
+{
+    printf("test_rssi_byte_does_not_pollute_next_frame...\n");
+    TelCtx_t ctx;
+    Telemetry_Init(&ctx);
+
+    Feed_Line(&ctx, TEL_LINE_SEQ("1"), 1000U);
+    Feed_Raw(&ctx, 0x9CU, 1000U);          /* -100 dBm */
+    Drain(&ctx);
+    Feed_Line(&ctx, TEL_LINE_SEQ("2"), 2000U);
+    Feed_Raw(&ctx, 0xC8U, 2000U);          /* -56 dBm */
+
+    TelData_t d;
+    CHECK(Telemetry_Parse(&ctx, &d) == TEL_VALID, "second frame valid");
+    CHECK(d.sequence == 2U, "second frame seq == 2");
+
+    int16_t dbm = 0; uint32_t seq = 0; uint8_t ok = 0;
+    CHECK(Telemetry_TakeRssi(&ctx, &dbm, &seq, &ok) == 1U, "latest RSSI available");
+    CHECK(dbm == -56 && seq == 2U && ok == 1U, "latest RSSI is -56 dBm for seq 2");
+
+    const TelStats_t *s = Telemetry_GetStats(&ctx);
+    CHECK(s->good_packets == 2U, "good_packets == 2");
+    CHECK(s->bad_tag == 0U,      "RSSI byte not glued to next TEL tag");
+    CHECK(s->parse_fail == 0U,   "parse_fail == 0");
+    CHECK(s->seq_gaps == 0U,     "no seq gap");
+}
+
+static void test_two_frames_one_packet_single_rssi(void)
+{
+    printf("test_two_frames_one_packet_single_rssi...\n");
+    TelCtx_t ctx;
+    Telemetry_Init(&ctx);
+
+    /* Replay + canli ayni E22 paketinde: tek RSSI byte'i en sonda. */
+    Feed_Line(&ctx, TEL_LINE_SEQ("5"), 1000U);
+    Feed_Line(&ctx, TEL_LINE_SEQ("6"), 1000U);
+    Feed_Raw(&ctx, 0xB4U, 1000U);          /* -76 dBm */
+
+    const TelStats_t *s = Telemetry_GetStats(&ctx);
+    CHECK(s->good_packets == 2U, "both frames good");
+    CHECK(s->rssi_samples == 1U, "single RSSI sample");
+
+    int16_t dbm = 0; uint32_t seq = 0; uint8_t ok = 0;
+    CHECK(Telemetry_TakeRssi(&ctx, &dbm, &seq, &ok) == 1U, "RSSI available");
+    CHECK(dbm == -76 && seq == 6U && ok == 1U, "RSSI bound to last frame (seq 6)");
+    CHECK(Telemetry_RssiFrameCount(&ctx) == 2U, "LQ frames == 2 (replay+live in one packet)");
+
+    /* Sonraki tek-frame'lik paket: sayac sifirlanmis olmali */
+    Drain(&ctx);
+    Feed_Line(&ctx, TEL_LINE_SEQ("7"), 2000U);
+    Feed_Raw(&ctx, 0xB0U, 2000U);
+    CHECK(Telemetry_TakeRssi(&ctx, &dbm, &seq, &ok) == 1U, "next RSSI available");
+    CHECK(seq == 7U && Telemetry_RssiFrameCount(&ctx) == 1U,
+          "frame counter reset per packet (seq 7, frames 1)");
+}
+
+static void test_rssi_disabled_module_still_parses(void)
+{
+    printf("test_rssi_disabled_module_still_parses...\n");
+    TelCtx_t ctx;
+    Telemetry_Init(&ctx);
+
+    /* REG3 bit7 henuz yazilmamis modul: '\n'den sonra dogrudan 'T'. */
+    Feed_Line(&ctx, TEL_LINE_SEQ("10"), 1000U);
+    Feed_Line(&ctx, TEL_LINE_SEQ("11"), 2000U);
+
+    const TelStats_t *s = Telemetry_GetStats(&ctx);
+    CHECK(s->good_packets == 2U, "both frames good without RSSI");
+    CHECK(s->rssi_samples == 0U, "no RSSI samples");
+    CHECK(s->bad_tag == 0U,      "no bad_tag");
+    CHECK(Telemetry_TakeRssi(&ctx, NULL, NULL, NULL) == 0U, "no RSSI pending");
+}
+
+static void test_rssi_after_invalid_line_has_no_seq(void)
+{
+    printf("test_rssi_after_invalid_line_has_no_seq...\n");
+    TelCtx_t ctx;
+    Telemetry_Init(&ctx);
+
+    Feed_Line(&ctx, TEL_LINE_SEQ("7"), 1000U);   /* gecerli */
+    Feed_Raw(&ctx, 0xA0U, 1000U);
+    (void)Telemetry_TakeRssi(&ctx, NULL, NULL, NULL);
+
+    Feed_Line(&ctx, "TEL,2,8,bozuk", 2000U);      /* alan sayisi yanlis */
+    Feed_Raw(&ctx, 0x90U, 2000U);                 /* -112 dBm */
+
+    int16_t dbm = 0; uint32_t seq = 0; uint8_t ok = 1;
+    CHECK(Telemetry_TakeRssi(&ctx, &dbm, &seq, &ok) == 1U, "RSSI available");
+    CHECK(dbm == -112, "RSSI -112 dBm");
+    CHECK(ok == 0U, "RSSI after invalid line -> seq not valid");
+    CHECK(Telemetry_RssiFrameCount(&ctx) == 0U, "invalid line not counted in LQ frames");
+    CHECK(Telemetry_GetStats(&ctx)->parse_fail == 1U, "invalid line counted");
+}
+
+static void test_rssi_raw_to_dbm(void)
+{
+    printf("test_rssi_raw_to_dbm...\n");
+    CHECK(Telemetry_RssiRawToDbm(0xFFU) == -1,   "0xFF -> -1 dBm");
+    CHECK(Telemetry_RssiRawToDbm(0x80U) == -128, "0x80 -> -128 dBm");
+    CHECK(Telemetry_RssiRawToDbm(0x00U) == -256, "0x00 -> -256 dBm");
+}
+
 int main(void)
 {
     test_real_aks_vector();
@@ -286,6 +434,12 @@ int main(void)
     test_ts_ms_overflow_rejected();
     test_ts_ms_negative_rejected();
     test_seq_above_int32_max_accepted();
+    test_rssi_byte_after_frame();
+    test_rssi_byte_does_not_pollute_next_frame();
+    test_two_frames_one_packet_single_rssi();
+    test_rssi_disabled_module_still_parses();
+    test_rssi_after_invalid_line_has_no_seq();
+    test_rssi_raw_to_dbm();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

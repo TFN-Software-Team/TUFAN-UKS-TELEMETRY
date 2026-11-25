@@ -28,7 +28,24 @@
  *  tetiklemelidir; operator girdisi GEREKTIRMEZ. Bkz. UYUM_NOTU.md bolum 2.
  * ========================================================================= */
 #define LORA_HEARTBEAT_BYTE       0xB0U
-#define LORA_HEARTBEAT_PERIOD_MS  1000U
+
+/* LINK-2K4: heartbeat zamanlamasi (bkz. main.c ana dongu).
+ *  Yari-dubleks tek kanalda UKS'in 0xB0'i AKS'in TEL paketiyle cakisirsa
+ *  IKISI de kaybolur (UKS TX'teyken AKS'i duyamaz, AKS de TX'teyken
+ *  heartbeat'i). Eskiden 1 Hz serbest zamanlayiciydi ve AKS'in 1 Hz TEL
+ *  akisiyla rastgele cakisiyordu (AKS saha logunda fiili heartbeat araligi
+ *  ~5-6 sn olculmustu).
+ *  Yeni kural:
+ *   - SENKRON: gecerli bir TEL frame'i alindiktan sonra hat
+ *     LORA_HEARTBEAT_QUIET_MS boyunca sessizse (ayni pakette baska frame /
+ *     RSSI byte'i gelmediyse) gonder — AKS bir sonraki tike kadar susar.
+ *     En sik LORA_HEARTBEAT_PERIOD_MS'te bir.
+ *   - YEDEK: frame gelmiyorsa (link DOWN / boot) LORA_HEARTBEAT_FALLBACK_MS'te
+ *     bir zamanlayiciyla gonder — AKS linki geri bulabilsin.
+ *  AKS LINK_TIMEOUT_MS=9000 >= 3 x FALLBACK (3000). */
+#define LORA_HEARTBEAT_PERIOD_MS    2000U
+#define LORA_HEARTBEAT_QUIET_MS      100U
+#define LORA_HEARTBEAT_FALLBACK_MS  3000U
 
 /* =========================================================================
  * Tip tanimlari
@@ -68,6 +85,24 @@ typedef struct {
  *                           sinyalidir, E32'deki gibi tolere EDILMEZ
  */
 LoraStatus_t Lora_Init        (LoraCtx_t *ctx, UART_HandleTypeDef *huart);
+
+/**
+ * @brief  Lora_Init SURESINCE (yalniz o sirada) bloklayan beklemeler
+ *         arasinda cagrilan watchdog besleme kancasi. Varsayilani weak/bos;
+ *         uygulama (main.c) HAL_IWDG_Refresh ile override eder.
+ *         Lora_Init disinda lora.c bu kancayi CAGIRMAZ.
+ */
+void         Lora_WatchdogKick(void);
+
+/* LINK-REINIT: link bu kadar suredir DOWN ise E22 yeniden ayarlanir
+ * (Lora_Init: register oku/gerekirse yaz + CRYPT'i C2/RAM ile tekrar yaz).
+ * Neden: CRYPT yalniz RAM'e yazilir (flash omru) — E22'nin beslemesi bir an
+ * gidip gelirse (sarsinti, voltaj dusumu) anahtar sessizce kaybolur ve link,
+ * UKS reset atilana kadar geri gelmez (bench 2026-11-25: 5 V cikar-tak).
+ * Yeniden deneme araligi: link DOWN kaldikca her LORA_REINIT_RETRY_MS'de
+ * bir. Read-before-write sayesinde flash'a yalniz fark varsa yazilir. */
+#define LORA_REINIT_AFTER_DOWN_MS   15000U
+#define LORA_REINIT_RETRY_MS        30000U
 
 void         Lora_SetRxByteHandler(LoraCtx_t *ctx, LoraRxCb_t cb, void *user);
 

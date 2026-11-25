@@ -59,6 +59,9 @@ static uint32_t         last_hb_stat_ms = 0;   /* UKS-03: 10 sn'de bir STAT, sat
 /* Heartbeat TX (0xB0) — UYUM_NOTU.md bolum 2: madde 9.2.a'nin izin verdigi
  * stabilizasyon-teyidi geri bildirimi. RF hattindaki TEK TX kaynagidir. */
 static uint32_t         last_heartbeat_tx_ms = 0;
+/* LINK-2K4: son heartbeat'ten beri gecerli bir TEL frame'i alindi mi
+ * (senkron heartbeat tetigi, bkz. lora.h LORA_HEARTBEAT_QUIET_MS). */
+static uint8_t          hb_frame_seen = 0;
 
 /* Link-down tespiti: son gecerli TEL frame'inin alindigi tick.
  * 0 = henuz hic gecerli frame alinmadi (boot durumu, timeout tetiklemez). */
@@ -72,6 +75,11 @@ static uint8_t          link_down = 0;
  * grace suresi bu kor noktayi kapatir. */
 #define TEL_BOOT_GRACE_MS   5000U
 static uint32_t         listen_start_ms = 0;
+
+/* LINK-REINIT (bkz. lora.h LORA_REINIT_AFTER_DOWN_MS): link DOWN'a gectigi
+ * an ve bir sonraki yeniden ayarlama denemesinin zamani. */
+static uint32_t         link_down_since_ms = 0;
+static uint32_t         next_reinit_ms     = 0;
 
 /* FIX-C: dashboard throttle — her DASH_EVERY_N frame'de bir bas */
 #define DASH_EVERY_N   3U
@@ -181,6 +189,9 @@ int main(void)
                (unsigned long)(freq_x1000 % 1000U));
         printf("      (REG0=0x%02X REG1=0x%02X REG2=0x%02X — bkz. Core/Inc/e22_regs.h)\r\n",
                (unsigned)E22_VAL_REG0, (unsigned)E22_VAL_REG1, (unsigned)E22_VAL_REG2);
+        printf("    REG3=0x%02X (RSSI byte %s — LQ satirlari)\r\n",
+               (unsigned)E22_UKS_VAL_REG3,
+               (E22_UKS_VAL_REG3 & E22_REG3_RSSI_BYTE_EN) ? "ACIK" : "KAPALI");
     }
 
     Telemetry_Init(&tel_ctx);
@@ -193,6 +204,10 @@ int main(void)
      *   4. Register blogunu (ADDH..CRYPT_L) oku + hex dump'la; hedeften
      *      (e22_regs.h) farkliysa C0 ile flash'a yaz ve dogrula
      *   5. Normal moda don
+     *
+     * IWDG burada CALISIYOR (yukarida MX_IWDG_Init). Lora_Init'in en kotu
+     * suresi IWDG timeout'unu asar; bu yuzden Lora_Init kendi bekleme
+     * noktalarinda Lora_WatchdogKick() ile besler (IWDG-BOOT FIX).
      */
     LoraStatus_t ls = Lora_Init(&lora_ctx, &huart2);
     if (ls == LORA_OK)
@@ -235,10 +250,17 @@ int main(void)
 
         /* Heartbeat TX (0xB0): AKS'e periyodik "canliyim" sinyali.
          * Best-effort — basarisizsa sessizce atlanir ve bir sonraki
-         * periyotta tekrar denenir. */
-        if ((now - last_heartbeat_tx_ms) >= LORA_HEARTBEAT_PERIOD_MS)
+         * periyotta tekrar denenir.
+         * LINK-2K4: AKS TEL paketinin hemen ARKASINA senkronlanir (kanal
+         * bos penceresi); frame yoksa yedek zamanlayici. Bkz. lora.h. */
+        uint32_t hb_since = now - last_heartbeat_tx_ms;
+        uint8_t  hb_sync  = (hb_frame_seen &&
+                             hb_since >= LORA_HEARTBEAT_PERIOD_MS &&
+                             (now - tel_ctx.last_rx_ms) >= LORA_HEARTBEAT_QUIET_MS) ? 1U : 0U;
+        if (hb_sync || hb_since >= LORA_HEARTBEAT_FALLBACK_MS)
         {
             last_heartbeat_tx_ms = now;
+            hb_frame_seen        = 0U;
 
             /* UKS-05: Lora_Send DEGIL — Lora_SendHeartbeatFast. Lora_Send
              * (Lora_TxSafe uzerinden) TX icin devam eden IT-RX'i abort
@@ -277,6 +299,34 @@ int main(void)
                 link_down = 1U;
                 printf("LINK,DOWN,%lu\r\n", (unsigned long)now);
             }
+
+            if (link_down)
+            {
+                link_down_since_ms = now;
+                next_reinit_ms     = now + LORA_REINIT_AFTER_DOWN_MS;
+            }
+        }
+
+        /* LINK-REINIT (bkz. lora.h): link uzun suredir DOWN ise E22'yi
+         * yeniden ayarla — CRYPT (RAM) besleme kesintisinde kaybolmus
+         * olabilir. Link zaten kopuk oldugundan bu ~0.3-1 s'lik bloklama
+         * veri kaybettirmez; Lora_Init kendi beklemelerinde IWDG'yi besler. */
+        if (link_down && (int32_t)(now - next_reinit_ms) >= 0)
+        {
+            printf("[CFG] Link %lu ms'dir DOWN — E22 yeniden ayarlaniyor\r\n",
+                   (unsigned long)(now - link_down_since_ms));
+            HAL_UART_AbortReceive(&huart2);
+            /* DR'de bekleyen eski bir RF baytini at — config yanit basligi
+             * (C1 addr len) ile karismasin (ESP tarafindaki uartFlush esi). */
+            __HAL_UART_FLUSH_DRREGISTER(&huart2);
+            LoraStatus_t rs = Lora_Init(&lora_ctx, &huart2);
+            /* Lora_Init rx_cb'yi sifirlar — handler ve IT-RX yeniden kurulur */
+            Lora_SetRxByteHandler(&lora_ctx, on_lora_rx_byte, &tel_ctx);
+            LoraStatus_t rx = Lora_StartReceive(&lora_ctx);
+            printf("[CFG] Yeniden ayarlama bitti: init=%d rx=%d\r\n",
+                   (int)rs, (int)rx);
+            now = HAL_GetTick();
+            next_reinit_ms = now + LORA_REINIT_RETRY_MS;
         }
 
         /* Heartbeat: her 3 saniyede istatistik bas */
@@ -353,6 +403,7 @@ int main(void)
             if (st == TEL_VALID)
             {
                 last_valid_tel_tick = now;
+                hb_frame_seen       = 1U;
 
                 if (link_down)
                 {
@@ -378,6 +429,33 @@ int main(void)
             {
                 const TelStats_t *qs = Telemetry_GetStats(&tel_ctx);
                 Telemetry_PrintDashboard(&d, st, link_down, qs->queue_overflow_drop);
+            }
+        }
+
+        /* LINK-2K4: link kalitesi (RSSI) satiri — makine-okunur, CSV
+         * forward'indan SONRA (ayni paketin CSV'si once gider).
+         *   LQ,<uks_tick_ms>,<rssi_dbm>,<seq|->,<frames>
+         * seq "-": RSSI'dan onceki satir gecerli bir frame degildi.
+         * frames: bu RSSI'nin radyo paketindeki gecerli TEL frame sayisi.
+         * E22 arka arkaya gelen frame'leri (AKS replay+canli) tek pakette
+         * birlestirebilir; seq o paketin SON frame'idir — ardisik LQ
+         * satirlari arasindaki seq atlamasi frames>1 ise KAYIP DEGILDIR.
+         * Monitor bunu juri CSV'sine DEGIL ayri link_*.csv dosyasina yazar.
+         * "CSV," ile baslamaz — eski monitor surumleri satiri yok sayar. */
+        {
+            int16_t  lq_dbm;
+            uint32_t lq_seq;
+            uint8_t  lq_seq_ok;
+            if (Telemetry_TakeRssi(&tel_ctx, &lq_dbm, &lq_seq, &lq_seq_ok))
+            {
+                const unsigned lq_frames =
+                    (unsigned)Telemetry_RssiFrameCount(&tel_ctx);
+                if (lq_seq_ok)
+                    printf("LQ,%lu,%d,%lu,%u\r\n", (unsigned long)now,
+                           (int)lq_dbm, (unsigned long)lq_seq, lq_frames);
+                else
+                    printf("LQ,%lu,%d,-,%u\r\n", (unsigned long)now,
+                           (int)lq_dbm, lq_frames);
             }
         }
     }
@@ -416,6 +494,16 @@ static void MX_USART2_UART_Init(void)
     huart2.Init.HwFlowCtl    = UART_HWCONTROL_NONE;
     huart2.Init.OverSampling = UART_OVERSAMPLING_16;
     if (HAL_UART_Init(&huart2) != HAL_OK) Error_Handler();
+}
+
+/* ====================================================================
+ * IWDG-BOOT FIX: lora.c'deki weak kancanin override'i. lora.c bunu
+ * YALNIZ Lora_Init suresince cagirir (bkz. lora.c "IWDG-BOOT FIX");
+ * ana dongude IWDG yine yalniz while(1) basindan beslenir.
+ * ==================================================================== */
+void Lora_WatchdogKick(void)
+{
+    HAL_IWDG_Refresh(&hiwdg);
 }
 
 /* ====================================================================

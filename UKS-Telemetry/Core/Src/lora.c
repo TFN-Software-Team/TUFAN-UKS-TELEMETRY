@@ -43,11 +43,49 @@
 /* =========================================================================
  * Yardimci: AUX HIGH bekle
  * ========================================================================= */
+/* =========================================================================
+ * IWDG-BOOT FIX: Lora_Init boyunca watchdog besleme
+ *
+ * main() IWDG'yi Lora_Init'ten ONCE baslatir (ORTA-1). Lora_Init'in en
+ * kotu durum suresi (AUX boot 3000 + config 500 + C1 okuma ~1200 + C0
+ * yazma ~3200 + tekrar okuma ~1200 + normal 500 + 50 ms) ~9-10 s'dir;
+ * IWDG ise LSI toleransi (30-60 kHz) yuzunden 2.7-5.3 s'de tetiklenir.
+ * Beslenmezse modul yavas acildiginda / AUX LOW kaldiginda kart sonsuz
+ * reset dongusune girer.
+ *
+ * Cozum: Lora_Init SURESINCE (s_init_wdg_kick=1) AUX bekleme dongusunde
+ * ve her register islemi basinda Lora_WatchdogKick() cagrilir. Iki
+ * besleme arasi en uzun blok ~1.2 s (TX 200 + RX 500 + RX 500 ms) —
+ * en kotu 2.7 s IWDG'ye marj var. Her bekleme kendi timeout'una sahip
+ * oldugu icin besleme sonsuz takilmayi maskeleyemez: Lora_Init her
+ * durumda sinirli surede doner.
+ *
+ * Lora_Init disinda (ana dongu: heartbeat, Lora_Send) bayrak 0'dir —
+ * "IWDG SADECE ana donguden beslenir" kurali calisma zamaninda aynen
+ * korunur.
+ *
+ * Lora_WatchdogKick() weak'tir; main.c HAL_IWDG_Refresh ile override
+ * eder (lora.c IWDG handle'ina bagimli kalmaz).
+ * ========================================================================= */
+static volatile uint8_t s_init_wdg_kick = 0U;
+
+__weak void Lora_WatchdogKick(void)
+{
+    /* Varsayilan: watchdog yok — hicbir sey yapma. */
+}
+
+static inline void E22_InitKick(void)
+{
+    if (s_init_wdg_kick) Lora_WatchdogKick();
+}
+
 static LoraStatus_t E22_WaitAuxHigh(uint32_t timeout_ms)
 {
     uint32_t start = HAL_GetTick();
+    E22_InitKick();
     while (HAL_GPIO_ReadPin(LORA_AUX_GPIO_Port, LORA_AUX_Pin) == GPIO_PIN_RESET)
     {
+        E22_InitKick();
         if ((HAL_GetTick() - start) >= timeout_ms)
             return LORA_ERR_TIMEOUT;
     }
@@ -133,6 +171,7 @@ static LoraStatus_t E22_EnterConfigMode(UART_HandleTypeDef *huart)
 static LoraStatus_t E22_ReadRegs(UART_HandleTypeDef *huart, uint8_t addr,
                                  uint8_t len, uint8_t *buf)
 {
+    E22_InitKick();   /* IWDG-BOOT FIX: blok oncesi besle */
     const uint8_t cmd[3] = { E22_CMD_READ, addr, len };
 
     __HAL_UART_CLEAR_OREFLAG(huart);
@@ -180,6 +219,7 @@ static LoraStatus_t E22_ReadRegs(UART_HandleTypeDef *huart, uint8_t addr,
 static LoraStatus_t E22_WriteRegsSaved(UART_HandleTypeDef *huart, uint8_t addr,
                                        uint8_t len, const uint8_t *vals)
 {
+    E22_InitKick();   /* IWDG-BOOT FIX: blok oncesi besle */
     if (len == 0U || len > E22_REG_BLOCK_LEN) return LORA_ERR;
 
     uint8_t cmd[3U + E22_REG_BLOCK_LEN];
@@ -192,12 +232,15 @@ static LoraStatus_t E22_WriteRegsSaved(UART_HandleTypeDef *huart, uint8_t addr,
     if (HAL_UART_Transmit(huart, cmd, (uint16_t)(3U + len), 200U) != HAL_OK)
         return LORA_ERR;
 
-    /* Flash yazma tamamlansin (AUX LOW->HIGH) */
-    if (E22_WaitAuxHigh(E22_AUX_CFG_TIMEOUT_MS) != LORA_OK)
-        return LORA_ERR_TIMEOUT;
-
+    /* CFG-RSP FIX: yaniti AUX'u beklemeden HEMEN okumaya basla. STM32
+     * UART'inda RX tamponu yok (tek baytlik DR); E22 yanitini AUX LOW iken
+     * gonderdiginde eski sira (once AUX bekle, sonra oku) baytlari ORE ile
+     * kaybediyor ve gercekte BASARILI yazim LORA_ERR_TIMEOUT (st=2) olarak
+     * raporlaniyordu (bench 2026-11-25: yazma tuttu, dogrulama "basarisiz").
+     * Baslik beklemesi E22_AUX_CFG_TIMEOUT_MS: flash yazma suresini kapsar.
+     * AUX, yanit alindiktan SONRA beklenir (mod gecisinden once modul bos). */
     uint8_t hdr[3] = {0};
-    if (HAL_UART_Receive(huart, hdr, sizeof(hdr), 500U) != HAL_OK)
+    if (HAL_UART_Receive(huart, hdr, sizeof(hdr), E22_AUX_CFG_TIMEOUT_MS) != HAL_OK)
     {
         HAL_UART_Abort(huart);
         __HAL_UART_CLEAR_OREFLAG(huart);
@@ -211,6 +254,7 @@ static LoraStatus_t E22_WriteRegsSaved(UART_HandleTypeDef *huart, uint8_t addr,
     if (hdr[0] != E22_CMD_READ || hdr[1] != addr || hdr[2] != len)
         return LORA_ERR;
 
+    E22_InitKick();
     uint8_t resp_vals[E22_REG_BLOCK_LEN] = {0};
     if (HAL_UART_Receive(huart, resp_vals, len, 500U) != HAL_OK)
     {
@@ -218,6 +262,10 @@ static LoraStatus_t E22_WriteRegsSaved(UART_HandleTypeDef *huart, uint8_t addr,
         __HAL_UART_CLEAR_OREFLAG(huart);
         return LORA_ERR_TIMEOUT;
     }
+
+    /* Flash yazma tamamlansin (AUX LOW->HIGH) — yanit alindiktan SONRA */
+    if (E22_WaitAuxHigh(E22_AUX_CFG_TIMEOUT_MS) != LORA_OK)
+        return LORA_ERR_TIMEOUT;
 
     for (uint8_t i = 0U; i < len; i++)
     {
@@ -251,6 +299,7 @@ static LoraStatus_t E22_WriteRegsSaved(UART_HandleTypeDef *huart, uint8_t addr,
 static LoraStatus_t E22_WriteRegsTemp(UART_HandleTypeDef *huart, uint8_t addr,
                                       uint8_t len, const uint8_t *vals)
 {
+    E22_InitKick();   /* IWDG-BOOT FIX: blok oncesi besle */
     if (len == 0U || len > E22_REG_BLOCK_LEN) return LORA_ERR;
 
     uint8_t cmd[3U + E22_REG_BLOCK_LEN];
@@ -263,13 +312,15 @@ static LoraStatus_t E22_WriteRegsTemp(UART_HandleTypeDef *huart, uint8_t addr,
     if (HAL_UART_Transmit(huart, cmd, (uint16_t)(3U + len), 200U) != HAL_OK)
         return LORA_ERR;
 
-    /* RAM yazma flash'a gitmez ama modul yine de AUX ile "mesgul" sinyali
-     * verir; kalici yazimla ayni bekleme marjini kullanilir. */
-    if (E22_WaitAuxHigh(E22_AUX_CFG_TIMEOUT_MS) != LORA_OK)
-        return LORA_ERR_TIMEOUT;
-
+    /* CFG-RSP FIX: yaniti AUX'u beklemeden HEMEN okumaya basla. STM32
+     * UART'inda RX tamponu yok (tek baytlik DR); E22 yanitini AUX LOW iken
+     * gonderdiginde eski sira (once AUX bekle, sonra oku) baytlari ORE ile
+     * kaybediyor ve gercekte BASARILI yazim LORA_ERR_TIMEOUT (st=2) olarak
+     * raporlaniyordu (bench 2026-11-25: yazma tuttu, dogrulama "basarisiz").
+     * Baslik beklemesi E22_AUX_CFG_TIMEOUT_MS: flash yazma suresini kapsar.
+     * AUX, yanit alindiktan SONRA beklenir (mod gecisinden once modul bos). */
     uint8_t hdr[3] = {0};
-    if (HAL_UART_Receive(huart, hdr, sizeof(hdr), 500U) != HAL_OK)
+    if (HAL_UART_Receive(huart, hdr, sizeof(hdr), E22_AUX_CFG_TIMEOUT_MS) != HAL_OK)
     {
         HAL_UART_Abort(huart);
         __HAL_UART_CLEAR_OREFLAG(huart);
@@ -283,6 +334,7 @@ static LoraStatus_t E22_WriteRegsTemp(UART_HandleTypeDef *huart, uint8_t addr,
     if (hdr[0] != E22_CMD_READ || hdr[1] != addr || hdr[2] != len)
         return LORA_ERR;
 
+    E22_InitKick();
     uint8_t resp_vals[E22_REG_BLOCK_LEN] = {0};
     if (HAL_UART_Receive(huart, resp_vals, len, 500U) != HAL_OK)
     {
@@ -290,6 +342,11 @@ static LoraStatus_t E22_WriteRegsTemp(UART_HandleTypeDef *huart, uint8_t addr,
         __HAL_UART_CLEAR_OREFLAG(huart);
         return LORA_ERR_TIMEOUT;
     }
+
+    /* RAM yazma flash'a gitmez ama modul yine de AUX ile "mesgul" sinyali
+     * verir — yanit alindiktan SONRA kalici yazimla ayni marjinle beklenir. */
+    if (E22_WaitAuxHigh(E22_AUX_CFG_TIMEOUT_MS) != LORA_OK)
+        return LORA_ERR_TIMEOUT;
 
     return LORA_OK;   /* deger karsilastirmasi yok — CRYPT geri okunamaz */
 }
@@ -318,7 +375,21 @@ static void E22_DumpBlock(const char *baslik, const uint8_t *blk, uint8_t len)
  *     dump'la
  *  6. Normal moda don
  * ========================================================================= */
+static LoraStatus_t Lora_InitImpl(LoraCtx_t *ctx, UART_HandleTypeDef *huart);
+
 LoraStatus_t Lora_Init(LoraCtx_t *ctx, UART_HandleTypeDef *huart)
+{
+    /* IWDG-BOOT FIX: yalniz init suresince besleme acik; govdedeki her
+     * erken return yolunda da kapansin diye sarmalayici kullanildi. */
+    s_init_wdg_kick = 1U;
+    Lora_WatchdogKick();
+    LoraStatus_t st = Lora_InitImpl(ctx, huart);
+    Lora_WatchdogKick();
+    s_init_wdg_kick = 0U;
+    return st;
+}
+
+static LoraStatus_t Lora_InitImpl(LoraCtx_t *ctx, UART_HandleTypeDef *huart)
 {
     if (!ctx || !huart) return LORA_ERR;
 

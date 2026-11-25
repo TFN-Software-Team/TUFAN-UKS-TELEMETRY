@@ -40,18 +40,20 @@ yönünde periyodik bir **heartbeat (0xB0)** sinyali kullanılacaktır (Adım 5)
   "canlılık" sinyalidir.
 - **Durum: UYGULANDI.** `main.c` içinde, mevcut 3 saniyelik istatistik
   zamanlayıcısından (`last_heartbeat_ms`) ayrı, bağımsız bir
-  `last_heartbeat_tx_ms` zamanlayıcısı eklendi. Her `LORA_HEARTBEAT_PERIOD_MS`
-  (1000 ms, `lora.h`) bir kez, `Lora_Send()` ile AKS'e tek byte `0xB0`
-  (`LORA_HEARTBEAT_BYTE`) gönderilir. Gönderim best-effort'tur: başarısız
-  olursa sessizce atlanır ve bir sonraki periyotta tekrar denenir — E-STOP
-  gibi kritik bir komut değildir, bu yüzden `Lora_SendCritical` değil
-  `Lora_Send` kullanılır.
+  `last_heartbeat_tx_ms` zamanlayıcısı eklendi. `Lora_SendHeartbeatFast()`
+  ile AKS'e tek byte `0xB0` (`LORA_HEARTBEAT_BYTE`) gönderilir.
+  LINK-2K4 zamanlaması (`lora.h`): geçerli bir TEL frame'inden sonra hat
+  `LORA_HEARTBEAT_QUIET_MS` (100 ms) sessizse gönderilir (AKS'in TEL
+  paketiyle çakışmasın diye kanalın boş penceresine senkron), en sık
+  `LORA_HEARTBEAT_PERIOD_MS` (2000 ms) aralıkla; frame gelmiyorsa
+  `LORA_HEARTBEAT_FALLBACK_MS` (3000 ms) yedek zamanlayıcıyla. Gönderim
+  best-effort'tur: başarısız olursa sessizce atlanır.
 
 Bu tasarımla heartbeat, 9.2.a'nın izin verdiği "stabilizasyon teyidi geri
-bildirimi" istisnasına girer ve kurala uygundur. UKS her ~1 saniyede bir
+bildirimi" istisnasına girer ve kurala uygundur. UKS her ~2-3 saniyede bir
 AKS'e `0xB0` byte'ı gönderir; bu, komut kanalından (0xA1-0xA4) bağımsızdır.
 AKS tarafı bu byte'ı almazsa (kendi link-timeout eşiğine göre) link_down
-durumuna geçer — UKS tarafında simetrik tespit `TEL_LINK_TIMEOUT_MS` (2000 ms,
+durumuna geçer — UKS tarafında simetrik tespit `TEL_LINK_TIMEOUT_MS` (3000 ms = 3 × AKS 1 Hz periyodu,
 `telemetry.h`) ile uygulanmıştır: bu süre boyunca geçerli `TEL` frame'i
 gelmezse UKS `LINK,DOWN` durumuna geçer ve PC'ye/konsola bildirir; geçerli
 bir frame geldiğinde `LINK,UP` ile geri döner.

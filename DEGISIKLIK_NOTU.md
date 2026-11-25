@@ -11,7 +11,7 @@ geçerlidir (üsttekiler alttakileri ezer):
    doküman kodla çelişirse **kod kazanır**, doküman güncellenir.
 2. **UKS Uyum Sözleşmesi** — `UKS-Telemetry/README.md` içindeki "UKS
    Uyum Sözleşmesi" bölümü. Kod ile native test (`test/native/test_telemetry_v2.c`,
-   55 kontrol, gerçek AKS golden-vektörü dahil) üzerinden birebir
+   92 kontrol, gerçek AKS golden-vektörü ve RSSI byte ayıklama dahil) üzerinden birebir
    doğrulanan tek doküman kaynağıdır.
 3. **Diğer tüm dokümanlar** — kök `README.md` §4, `AKS/Documents/UKS_LoRa_Protocol.md`,
    vb. Bunlar (2)'den türetilir; aralarında çelişki çıkarsa güncellenmesi

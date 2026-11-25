@@ -100,14 +100,13 @@
 
 /* Link-down esigi: bu suredir gecerli TEL frame'i gelmediyse baglanti
  * kopmus sayilir (bkz. main.c link_down state, UYUM_NOTU.md bolum 2).
- * AKS tarafi 4.8 kbps hava hizi kalibrasyonuyla 2 Hz'e geri dondu
- * (LORA_TX_PERIOD_MS=500, bkz. AKS SystemConfig.h); nominal frame araligi
- * ~500 ms. Onceki deger (4000U) onceki periyotla (1000 ms) tam 4x marj
- * tasiyordu; ayni 4x oran AYNI COMMIT'te korunarak 2000U'ya yeniden
- * kalibre edildi (>= 3x LORA_TX_PERIOD_MS invaryanti icin bkz.
- * tools/e2e/test_contract_drift.py::
+ * LINK-2K4: AKS 1 Hz gonderir (LORA_TX_PERIOD_MS=1000, 2.4 kbps — bkz. AKS
+ * SystemConfig.h ve e22_regs.h REG0 notu). 3000 ms = 3x periyot: art arda
+ * 2 kayip frame tolere edilir, 3.'sunde LINK,DOWN. AKS tools/e2e/contract.py
+ * TEL_LINK_TIMEOUT_MS=3000 ile AYNI (>= 3x LORA_TX_PERIOD_MS invaryanti icin
+ * bkz. tools/e2e/test_contract_drift.py::
  * test_uks_tel_link_timeout_has_enough_margin_over_tx_period). */
-#define TEL_LINK_TIMEOUT_MS     2000U
+#define TEL_LINK_TIMEOUT_MS     3000U
 
 /* ========== Tipler ========== */
 
@@ -184,6 +183,7 @@ typedef struct {
     uint32_t good_packets;
     uint32_t seq_gaps;         /* Beklenenin uzerinde atlama */
     uint32_t seq_dup_or_stale; /* Ayni veya geri giden sira */
+    uint32_t rssi_samples;     /* Paket sonundan ayiklanan RSSI byte sayisi */
 
     /* Heartbeat TX (0xB0) sonuc sayaclari — main.c Lora_Send donus
      * degerini burada takip eder (bkz. main.c ana dongu). */
@@ -219,6 +219,17 @@ typedef struct {
 
     TelStats_t stats;
     uint32_t   last_rx_ms;       /* son byte'in ana donguda islenme zamani */
+
+    /* RSSI byte ayiklama (E22 REG3 bit7, bkz. e22_regs.h). E22 RSSI
+     * byte'ini PAKETIN sonuna, yani TEL satirinin '\n'inden hemen sonra
+     * ekler. '\n'den sonraki ilk byte 'T' (yeni frame) degilse RSSI'dir. */
+    uint8_t    rssi_expect;      /* son byte '\n' idi — sonraki RSSI olabilir */
+    uint8_t    rssi_pending;     /* main.c'nin henuz almadigi yeni olcum var */
+    uint8_t    rssi_raw;         /* son RSSI byte'i (ham) */
+    uint8_t    rssi_seq_valid;   /* RSSI'dan onceki satir gecerli bir frame miydi */
+    uint32_t   rssi_seq;         /* o frame'in seq'i */
+    uint8_t    rssi_frames_acc;  /* son RSSI'dan beri gecerli frame sayaci */
+    uint8_t    rssi_frames;      /* son RSSI'nin paketindeki gecerli frame */
 } TelCtx_t;
 
 /* ========== Decoder (AKS -> UKS) ========== */
@@ -238,6 +249,20 @@ uint8_t     Telemetry_IsFrameReady(const TelCtx_t *ctx);
 
 /** Hazir frame'i out'a kopyalar. Hazir frame yoksa TEL_NO_DATA. */
 TelStatus_t Telemetry_Parse       (TelCtx_t *ctx, TelData_t *out);
+
+/** Yeni bir RSSI olcumu varsa 1 doner ve dBm + iliskili frame seq'ini
+ *  yazar (seq_valid=0 ise RSSI'dan onceki satir gecerli frame degildi).
+ *  Olcum bir kez alinir (pending temizlenir). Yoksa 0. */
+uint8_t     Telemetry_TakeRssi    (TelCtx_t *ctx, int16_t *dbm,
+                                   uint32_t *seq, uint8_t *seq_valid);
+
+/** Son alinan RSSI byte'inin ait oldugu radyo paketinde kac GECERLI TEL
+ *  frame'i vardi (E22, UART'a arka arkaya yazilan frame'leri tek pakette
+ *  birlestirebilir — AKS replay+canli). LQ satirinin 5. alani. */
+uint8_t     Telemetry_RssiFrameCount(const TelCtx_t *ctx);
+
+/** E22 RSSI byte'ini dBm'e cevirir: dBm = -(256 - raw). */
+int16_t     Telemetry_RssiRawToDbm(uint8_t raw);
 
 /** Yarim satir varsa timeout ile iptal eder. Periyodik cagir. */
 void        Telemetry_Tick        (TelCtx_t *ctx, uint32_t now_ms);

@@ -301,7 +301,7 @@ main.c başlığında numaralandırılmış, halen geçerli düzeltmeler:
 
 UKS-Telemetry'de **native unit test altyapısı vardır**: `telemetry.c` STM32 HAL'e bağımlı değildir (yalnızca `stdint`/`stddef`/`stdio`/`string` kullanır — GPIO/UART register erişimi `lora.c`'de izole edilmiştir), bu yüzden hedef MCU'ya ihtiyaç olmadan doğrudan host `gcc` ile derlenip PC üzerinde çalıştırılabilir.
 
-Test dosyası: `test/native/test_telemetry_v2.c` — `Parse_Int`/`Parse_U32` taşma sınırlarını, `Decode_Line` sanity-check aralıklarını, `Track_Sequence` gap/dup tespitini ve gerçek bir AKS golden-vektörünü kapsayan **55 kontrol**.
+Test dosyası: `test/native/test_telemetry_v2.c` — `Parse_Int`/`Parse_U32` taşma sınırlarını, `Decode_Line` sanity-check aralıklarını, gerçek bir AKS golden-vektörünü ve E22 RSSI byte ayıklamasını ve paket başına frame sayısını (LINK-2K4) kapsayan **92 kontrol**.
 
 **Çalıştırma:**
 
@@ -319,7 +319,7 @@ gcc -std=c99 -Wall -Wextra -I../../Core/Inc \
     -o test_telemetry_v2 && ./test_telemetry_v2
 ```
 
-Beklenen çıktı: `55 checks, 0 failures`.
+Beklenen çıktı: `92 checks, 0 failures`.
 
 ---
 
