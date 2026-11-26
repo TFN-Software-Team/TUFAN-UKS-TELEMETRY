@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TUFAN Wi-Fi Telemetri</title>
+<!-- Wi-Fi TEST telemetri yolu (LoRa resmi kanaldir). Kaynak: AKS
+     ESP_AKS/src/wifi_telemetry.cpp. Kullanim: README.md (bu klasor). -->
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<style>
+:root {
+  --bg: #f5f6f8; --panel: #ffffff; --ink: #16181d; --muted: #646b78;
+  --line: #dde1e7; --accent: #1f6feb; --ok: #1a7f37; --warn: #b26b00; --bad: #c62828;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1115; --panel: #171a21; --ink: #e7e9ee; --muted: #9aa2b1;
+    --line: #2a2f3a; --accent: #58a6ff; --ok: #3fb950; --warn: #d29922; --bad: #f85149;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center;
+  padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+header h1 { font-size: 17px; margin: 0; }
+.badge { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.badge.test { color: var(--warn); border-color: var(--warn); }
+#conn { font-weight: 600; }
+#conn.ok { color: var(--ok); } #conn.warn { color: var(--warn); } #conn.bad { color: var(--bad); }
+main { max-width: 1200px; margin: 0 auto; padding: 16px; display: grid; gap: 16px; }
+details.settings { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; }
+details.settings summary { cursor: pointer; font-weight: 600; }
+.form { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-top: 10px; }
+.form label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+.form input, .form select { font: inherit; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line);
+  background: var(--bg); color: var(--ink); min-width: 0; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--accent);
+  background: var(--accent); color: #fff; cursor: pointer; }
+button.secondary { background: transparent; color: var(--accent); }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.card .k { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.card .v { font-size: 28px; font-weight: 650; font-variant-numeric: tabular-nums; margin-top: 2px; }
+.card .u { font-size: 14px; color: var(--muted); font-weight: 400; margin-left: 4px; }
+.card .s { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.stale .card .v { opacity: .35; }
+.flags { display: flex; flex-wrap: wrap; gap: 8px; }
+.flag { font-size: 13px; padding: 3px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); }
+.flag.on { border-color: var(--ok); color: var(--ok); } .flag.alarm { border-color: var(--bad); color: var(--bad); }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.panel h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+canvas { width: 100%; height: 180px; display: block; }
+.legend { display: flex; gap: 16px; font-size: 12px; color: var(--muted); margin-top: 4px; }
+.legend i { display: inline-block; width: 12px; height: 3px; vertical-align: middle; margin-right: 4px; }
+pre#raw { font: 12px/1.45 var(--mono); margin: 0; max-height: 220px; overflow: auto; white-space: pre; color: var(--muted); }
+.stats { font-size: 13px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 18px; }
+.stats b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<header>
+  <h1>TUFAN Wi-Fi Telemetri</h1>
+  <span class="badge test">TEST yolu — resmi kanal LoRa</span>
+  <span id="conn" class="bad">Bağlı değil</span>
+  <span class="badge" id="srcBadge">—</span>
+</header>
+
+<main>
+  <details class="settings" id="settings">
+    <summary>Bağlantı ayarları</summary>
+    <div class="form">
+      <label>Kaynak
+        <select id="mode">
+          <option value="mqtt">MQTT (HiveMQ Cloud — farklı ağdan)</option>
+          <option value="direct">Doğrudan ESP32 (aynı hotspot)</option>
+        </select>
+      </label>
+      <label class="mqttOnly">WSS adresi
+        <input id="wssUrl" placeholder="wss://xxxxxxxx.s1.eu.hivemq.cloud:8884/mqtt">
+      </label>
+      <label class="mqttOnly">Kullanıcı adı
+        <input id="user" autocomplete="username">
+      </label>
+      <label class="mqttOnly">Şifre
+        <input id="pass" type="password" autocomplete="current-password">
+      </label>
+      <label class="mqttOnly">Konu kökü
+        <input id="topic" placeholder="tufan/aks">
+      </label>
+      <label class="directOnly">ESP32 adresi
+        <input id="espUrl" placeholder="http://192.168.43.120">
+      </label>
+    </div>
+    <div class="row">
+      <label style="font-size:13px;color:var(--muted)"><input type="checkbox" id="remember"> Şifreyi bu tarayıcıda hatırla</label>
+    </div>
+    <div class="row">
+      <button id="connectBtn">Bağlan</button>
+      <button id="disconnectBtn" class="secondary">Kes</button>
+      <button id="downloadBtn" class="secondary">Oturum CSV indir</button>
+    </div>
+  </details>
+
+  <section class="cards" id="cards">
+    <div class="card"><div class="k">Hız</div><div class="v"><span id="spd">--</span><span class="u">km/h</span></div><div class="s">spd_x10 / 10</div></div>
+    <div class="card"><div class="k">Paket gerilimi</div><div class="v"><span id="packV">--</span><span class="u">V</span></div><div class="s">packV / 10</div></div>
+    <div class="card"><div class="k">Akım</div><div class="v"><span id="cur">--</span><span class="u">A</span></div><div class="s">centi-A / 100 · + şarj</div></div>
+    <div class="card"><div class="k">SoC</div><div class="v"><span id="soc">--</span><span class="u">%</span></div><div class="s">BMS SoC</div></div>
+    <div class="card"><div class="k">Batarya sıcaklığı</div><div class="v"><span id="tempH">--</span><span class="u">°C</span></div><div class="s">en düşük <span id="tempL">--</span> °C</div></div>
+    <div class="card"><div class="k">Hücre max / min</div><div class="v"><span id="cellMax">--</span><span class="u">V</span></div><div class="s">min <span id="cellMin">--</span> V · fark <span id="cellDelta">--</span> mV</div></div>
+    <div class="card"><div class="k">Motor RPM</div><div class="v"><span id="rpm">--</span></div><div class="s">motor V <span id="motorV">--</span> V (4. alan)</div></div>
+    <div class="card"><div class="k">Çalışma modu</div><div class="v" style="font-size:22px"><span id="sys">--</span></div><div class="s">sysState (akımdan türetilir)</div></div>
+  </section>
+
+  <section class="flags" id="flags">
+    <span class="flag" id="fBms">BMS verisi</span>
+    <span class="flag" id="fMotor">Motor verisi</span>
+    <span class="flag" id="fTimeout">Motor timeout</span>
+    <span class="flag" id="fErr">Motor hata: --</span>
+  </section>
+
+  <section class="panel">
+    <h2>Son 60 saniye</h2>
+    <canvas id="chart" width="1100" height="180"></canvas>
+    <div class="legend"><span><i style="background:var(--accent)"></i>Hız (km/h)</span><span><i style="background:var(--warn)"></i>Akım (A)</span></div>
+  </section>
+
+  <section class="panel">
+    <h2>Bağlantı</h2>
+    <div class="stats">
+      <span>Son satır: <b id="age">--</b></span>
+      <span>Hız: <b id="rate">--</b> satır/s</span>
+      <span>Alınan: <b id="nRx">0</b></span>
+      <span>Kayıp (seq boşluğu): <b id="nGap">0</b></span>
+      <span>Hatalı satır: <b id="nBad">0</b></span>
+      <span>ESP32 IP: <b id="espIp">--</b></span>
+      <span>RSSI: <b id="espRssi">--</b> dBm</span>
+      <span>ESP32 çalışma: <b id="espUp">--</b></span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Ham TEL satırları (son 40)</h2>
+    <pre id="raw"></pre>
+  </section>
+</main>
+
+<script>
+"use strict";
+// TEL v2 alanları — AKS Telemetry::formatFrame ile aynı sıra (19 alan).
+// DİKKAT: 4. alan sözleşmede "torque" adlı ama motor voltajı (deciV) taşır;
+// current centi-Amper'dir (/100 = A). Bkz. AKS lib/Telemetry/Telemetry.h.
+const FIELDS = ["tag","ver","seq","rpm","torque","motorErr","motorValid","motorTimeout",
+  "cellVMax","cellVMin","tempH","tempL","sysState","packV","current","soc","bmsValid","ts_ms","spd_x10"];
+const STALE_MS = 3000, CHART_SEC = 60, RAW_KEEP = 40;
+const SYS_LABEL = {1: "Deşarj", 2: "Boşta", 3: "Şarj"};
+const $ = id => document.getElementById(id);
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("tufanWifi." + k); return v === null ? d : v; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("tufanWifi." + k, v); } catch {} },
+  del(k) { try { localStorage.removeItem("tufanWifi." + k); } catch {} },
+};
+
+let client = null, pollTimer = null, statusTimer = null;
+let lastSeq = null, lastTsMs = null, lastRxAt = 0;
+let nRx = 0, nGap = 0, nBad = 0;
+const rxTimes = [], history = [], rawLines = [], sessionLines = [];
+
+// ---- Ayarlar ----
+function loadSettings() {
+  $("mode").value = store.get("mode", "mqtt");
+  $("wssUrl").value = store.get("wssUrl", "");
+  $("user").value = store.get("user", "");
+  $("topic").value = store.get("topic", "tufan/aks");
+  $("espUrl").value = store.get("espUrl", "");
+  const p = store.get("pass", null);
+  if (p !== null) { $("pass").value = p; $("remember").checked = true; }
+  applyMode();
+  if (!$("wssUrl").value && !$("espUrl").value) $("settings").open = true;
+}
+function saveSettings() {
+  for (const k of ["mode","wssUrl","user","topic","espUrl"]) store.set(k, $(k).value.trim());
+  if ($("remember").checked) store.set("pass", $("pass").value); else store.del("pass");
+}
+function applyMode() {
+  const m = $("mode").value;
+  document.querySelectorAll(".mqttOnly").forEach(e => e.style.display = m === "mqtt" ? "" : "none");
+  document.querySelectorAll(".directOnly").forEach(e => e.style.display = m === "direct" ? "" : "none");
+}
+$("mode").addEventListener("change", applyMode);
+
+function setConn(text, cls) { const c = $("conn"); c.textContent = text; c.className = cls; }
+
+// ---- TEL satırı işleme ----
+function handleLine(raw) {
+  const line = raw.trim();
+  if (!line) return;
+  const f = line.split(",");
+  if (f.length !== FIELDS.length || f[0] !== "TEL" || f.slice(1).some(x => !/^-?\d+$/.test(x))) { nBad++; return; }
+  const d = {};
+  FIELDS.forEach((k, i) => { d[k] = i === 0 ? f[0] : Number(f[i]); });
+
+  if (lastSeq !== null) {
+    if (d.seq <= lastSeq) {
+      // Ya tekrar (MQTT outbox / polling çakışması) ya da ESP32 yeniden başladı.
+      if (lastTsMs !== null && d.ts_ms < lastTsMs - 5000) { lastSeq = null; }
+      else return;  // tekrar → yoksay
+    } else if (d.seq > lastSeq + 1) {
+      nGap += d.seq - lastSeq - 1;
+    }
+  }
+  lastSeq = d.seq; lastTsMs = d.ts_ms;
+  nRx++; lastRxAt = Date.now(); rxTimes.push(lastRxAt);
+  rawLines.push(line); if (rawLines.length > RAW_KEEP) rawLines.shift();
+  sessionLines.push(new Date().toISOString() + "," + line);
+  if (sessionLines.length > 200000) sessionLines.shift();
+  if (history.length && d.ts_ms < history[history.length - 1].t) history.length = 0;  // reboot
+  history.push({ t: d.ts_ms, spd: d.spd_x10 / 10, cur: d.current / 100 });  // ESP32 saati: ağ gecikmesi grafiği bozmasın
+  render(d);
+}
+
+function fmt(v, digits) { return Number.isFinite(v) ? v.toFixed(digits) : "--"; }
+function render(d) {
+  $("spd").textContent = fmt(d.spd_x10 / 10, 1);
+  $("packV").textContent = fmt(d.packV / 10, 1);
+  $("cur").textContent = fmt(d.current / 100, 2);
+  $("soc").textContent = fmt(d.soc / 100, 1);
+  $("tempH").textContent = d.tempH; $("tempL").textContent = d.tempL;
+  $("cellMax").textContent = fmt(d.cellVMax / 10000, 3);   // deci-mV → V
+  $("cellMin").textContent = fmt(d.cellVMin / 10000, 3);
+  $("cellDelta").textContent = fmt((d.cellVMax - d.cellVMin) / 10, 1);
+  $("rpm").textContent = d.rpm; $("motorV").textContent = fmt(d.torque / 10, 1);
+  $("sys").textContent = SYS_LABEL[d.sysState] || ("? (" + d.sysState + ")");
+  setFlag("fBms", d.bmsValid === 1, "BMS verisi " + (d.bmsValid ? "geçerli" : "YOK"));
+  setFlag("fMotor", d.motorValid === 1, "Motor verisi " + (d.motorValid ? "geçerli" : "YOK"));
+  const tf = $("fTimeout"); tf.textContent = "Motor timeout" + (d.motorTimeout ? " AKTİF" : " yok");
+  tf.className = "flag" + (d.motorTimeout ? " alarm" : " on");
+  const ef = $("fErr"); ef.textContent = "Motor hata: 0x" + d.motorErr.toString(16).toUpperCase().padStart(2, "0");
+  ef.className = "flag" + (d.motorErr ? " alarm" : " on");
+  $("raw").textContent = rawLines.join("\n");
+}
+function setFlag(id, on, text) { const e = $(id); e.textContent = text; e.className = "flag" + (on ? " on" : " alarm"); }
+
+function handleStatus(s) {
+  if (!s || typeof s !== "object") return;
+  if (s.online === false) { $("espIp").textContent = "çevrimdışı"; return; }
+  $("espIp").textContent = s.ip || "--";
+  $("espRssi").textContent = s.rssi || "--";
+  if (Number.isFinite(s.uptimeMs)) $("espUp").textContent = Math.round(s.uptimeMs / 1000) + " s";
+}
+
+// ---- MQTT ----
+function connectMqtt() {
+  const url = $("wssUrl").value.trim(), base = ($("topic").value.trim() || "tufan/aks").replace(/\/+$/, "");
+  if (!url) { setConn("WSS adresi eksik", "bad"); $("settings").open = true; return; }
+  if (typeof mqtt === "undefined") { setConn("mqtt.js yüklenemedi (internet?)", "bad"); return; }
+  setConn("Bağlanıyor…", "warn");
+  $("srcBadge").textContent = "MQTT · " + base;
+  client = mqtt.connect(url, {
+    username: $("user").value.trim(), password: $("pass").value,
+    clientId: "tufan-web-" + Math.random().toString(16).slice(2, 10),
+    clean: true, reconnectPeriod: 3000, connectTimeout: 10000,
+  });
+  client.on("connect", () => {
+    setConn("Broker'a bağlı", "ok");
+    client.subscribe([base + "/tel", base + "/status"], { qos: 0 }, err => {
+      if (err) setConn("Abonelik hatası: " + err.message, "bad");
+    });
+  });
+  client.on("reconnect", () => setConn("Yeniden bağlanıyor…", "warn"));
+  client.on("close", () => { if (client) setConn("Broker bağlantısı yok", "bad"); });
+  client.on("error", e => setConn("Hata: " + (e && e.message || e), "bad"));
+  client.on("message", (topic, payload) => {
+    const text = payload.toString();
+    if (topic.endsWith("/status")) { try { handleStatus(JSON.parse(text)); } catch {} }
+    else text.split(/\r?\n/).forEach(handleLine);
+  });
+}
+
+// ---- Doğrudan ESP32 (polling) ----
+function connectDirect() {
+  let base = $("espUrl").value.trim().replace(/\/+$/, "");
+  if (!base) { setConn("ESP32 adresi eksik", "bad"); $("settings").open = true; return; }
+  if (!/^https?:\/\//.test(base)) base = "http://" + base;
+  $("srcBadge").textContent = "Doğrudan · " + base;
+  setConn("Bağlanıyor…", "warn");
+  let busy = false;
+  const poll = async () => {
+    if (busy) return; busy = true;
+    try {
+      const q = lastSeq === null ? "" : "?since=" + lastSeq;
+      const r = await fetch(base + "/telemetry.csv" + q, { cache: "no-store" });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      (await r.text()).split(/\r?\n/).forEach(handleLine);
+      setConn("ESP32'ye bağlı", "ok");
+    } catch (e) { setConn("ESP32'ye ulaşılamıyor (" + e.message + ")", "bad"); }
+    finally { busy = false; }
+  };
+  const status = async () => {
+    try { const r = await fetch(base + "/status", { cache: "no-store" }); if (r.ok) handleStatus(await r.json()); } catch {}
+  };
+  poll(); status();
+  pollTimer = setInterval(poll, 500);
+  statusTimer = setInterval(status, 5000);
+}
+
+function disconnect() {
+  if (client) { const c = client; client = null; c.end(true); }
+  clearInterval(pollTimer); clearInterval(statusTimer); pollTimer = statusTimer = null;
+  setConn("Bağlı değil", "bad"); $("srcBadge").textContent = "—";
+}
+
+$("connectBtn").addEventListener("click", () => {
+  disconnect(); saveSettings();
+  lastSeq = null; lastTsMs = null;
+  ($("mode").value === "mqtt" ? connectMqtt : connectDirect)();
+  $("settings").open = false;
+});
+$("disconnectBtn").addEventListener("click", disconnect);
+$("downloadBtn").addEventListener("click", () => {
+  const header = "pc_time," + FIELDS.join(",") + "\n";
+  const blob = new Blob([header + sessionLines.join("\n") + "\n"], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "wifi_tel_" + new Date().toISOString().replace(/[:.]/g, "-") + ".csv";
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+
+// ---- Periyodik: bayatlık, hız, grafik ----
+function cssVar(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+function drawChart() {
+  const cv = $("chart"), ctx = cv.getContext("2d");
+  const w = cv.clientWidth, h = cv.clientHeight, dpr = window.devicePixelRatio || 1;
+  if (cv.width !== Math.round(w * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  if (!history.length) return;
+  const t0 = history[history.length - 1].t - CHART_SEC * 1000;
+  while (history.length && history[0].t < t0) history.shift();
+  ctx.strokeStyle = cssVar("--line"); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2); ctx.stroke();
+  if (history.length < 2) return;
+  const series = (key, color) => {
+    const vals = history.map(p => p[key]);
+    let lo = Math.min(0, ...vals), hi = Math.max(1, ...vals);
+    if (hi - lo < 1) hi = lo + 1;
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath();
+    history.forEach((p, i) => {
+      const x = (p.t - t0) / (CHART_SEC * 1000) * w;
+      const y = h - 6 - (p[key] - lo) / (hi - lo) * (h - 12);
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.stroke();
+  };
+  series("spd", cssVar("--accent"));
+  series("cur", cssVar("--warn"));
+}
+setInterval(() => {
+  const now = Date.now();
+  while (rxTimes.length && rxTimes[0] < now - 5000) rxTimes.shift();
+  $("rate").textContent = (rxTimes.length / 5).toFixed(1);
+  $("nRx").textContent = nRx; $("nGap").textContent = nGap; $("nBad").textContent = nBad;
+  const stale = !lastRxAt || now - lastRxAt > STALE_MS;
+  $("cards").classList.toggle("stale", stale);
+  $("age").textContent = lastRxAt ? ((now - lastRxAt) / 1000).toFixed(1) + " s önce" + (stale ? " (BAYAT)" : "") : "--";
+  drawChart();
+}, 250);
+
+loadSettings();
+</script>
+</body>
+</html>
