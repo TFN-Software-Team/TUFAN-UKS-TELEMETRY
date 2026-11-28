@@ -297,9 +297,11 @@ class MqttSource:
 
 class EspPollSource:
     """ESP32'ye aynı ağdan doğrudan HTTP ile bağlanır:
-    GET /telemetry.csv?since=<son seq> (0,5 sn) + GET /status (5 sn)."""
+    GET /telemetry.csv?since=<son seq> (0,2 sn) + GET /status (5 sn).
+    0,2 sn: kaynak 1-5 Hz; 0,5 sn çekme ekrana ~0,25 sn ortalama gecikme
+    ekliyordu. İstek küçüktür (yalnız since sonrası satırlar)."""
 
-    def __init__(self, store: LogStore, base_url: str, period: float = 0.5):
+    def __init__(self, store: LogStore, base_url: str, period: float = 0.2):
         if not re.match(r"^https?://", base_url):
             base_url = "http://" + base_url
         self.base = base_url.rstrip("/")
