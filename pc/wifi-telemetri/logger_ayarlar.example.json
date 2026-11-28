@@ -1,0 +1,12 @@
+{
+  "source": "mqtt",
+  "broker": "xxxxxxxx.s1.eu.hivemq.cloud",
+  "mqtt_port": 8883,
+  "tls": true,
+  "user": "tufan-pc",
+  "password": "",
+  "topic": "tufan/aks",
+  "esp": "http://192.168.43.120",
+  "listen": "127.0.0.1",
+  "http_port": 8080
+}

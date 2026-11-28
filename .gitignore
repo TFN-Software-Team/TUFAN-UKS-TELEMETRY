@@ -74,3 +74,8 @@ Thumbs.db
 
 # Stray/duplicate nested project copy (accidental nested clone/extract)
 UKS-Telemetry/UKS-Telemetry/
+# Wi-Fi TEST logger'ı (pc/wifi-telemetri): kişisel ayar/şifre dosyası ve kayıtlar
+pc/wifi-telemetri/logger_ayarlar.json
+pc/wifi-telemetri/logs/
+__pycache__/
+.pytest_cache/

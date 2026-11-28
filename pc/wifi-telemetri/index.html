@@ -74,6 +74,7 @@ pre#raw { font: 12px/1.45 var(--mono); margin: 0; max-height: 220px; overflow: a
     <div class="form">
       <label>Kaynak
         <select id="mode">
+          <option value="logger">PC Logger (kayıtlı veri — logger.py)</option>
           <option value="mqtt">MQTT (HiveMQ Cloud — farklı ağdan)</option>
           <option value="direct">Doğrudan ESP32 (aynı hotspot)</option>
         </select>
@@ -89,6 +90,9 @@ pre#raw { font: 12px/1.45 var(--mono); margin: 0; max-height: 220px; overflow: a
       </label>
       <label class="mqttOnly">Konu kökü
         <input id="topic" placeholder="tufan/aks">
+      </label>
+      <label class="loggerOnly">Logger adresi
+        <input id="loggerUrl" placeholder="http://localhost:8080">
       </label>
       <label class="directOnly">ESP32 adresi
         <input id="espUrl" placeholder="http://192.168.43.120">
@@ -139,7 +143,14 @@ pre#raw { font: 12px/1.45 var(--mono); margin: 0; max-height: 220px; overflow: a
       <span>ESP32 IP: <b id="espIp">--</b></span>
       <span>RSSI: <b id="espRssi">--</b> dBm</span>
       <span>ESP32 çalışma: <b id="espUp">--</b></span>
+      <span class="loggerOnly">Kayıt dosyası: <b id="logFile">--</b></span>
+      <span class="loggerOnly">Logger kaynağı: <b id="logSrc">--</b></span>
     </div>
+  </section>
+
+  <section class="panel loggerOnly">
+    <h2>Kayıtlı log dosyaları (logger)</h2>
+    <div class="stats" id="logList">--</div>
   </section>
 
   <section class="panel">
@@ -164,7 +175,7 @@ const store = {
   del(k) { try { localStorage.removeItem("tufanWifi." + k); } catch {} },
 };
 
-let client = null, pollTimer = null, statusTimer = null;
+let client = null, pollTimer = null, statusTimer = null, bulk = false, lastParsed = null;
 let lastSeq = null, lastTsMs = null, lastRxAt = 0;
 let nRx = 0, nGap = 0, nBad = 0;
 const rxTimes = [], history = [], rawLines = [], sessionLines = [];
@@ -176,19 +187,26 @@ function loadSettings() {
   $("user").value = store.get("user", "");
   $("topic").value = store.get("topic", "tufan/aks");
   $("espUrl").value = store.get("espUrl", "");
+  $("loggerUrl").value = store.get("loggerUrl", "");
+  // Sayfa logger.py tarafından sunuluyorsa (http://...) varsayılan kaynak logger'dır.
+  const servedByLogger = /^https?:$/.test(location.protocol);
+  if (servedByLogger && !$("loggerUrl").value) $("loggerUrl").value = location.origin;
+  if (servedByLogger && store.get("mode", null) === null) $("mode").value = "logger";
   const p = store.get("pass", null);
   if (p !== null) { $("pass").value = p; $("remember").checked = true; }
   applyMode();
+  if (servedByLogger && $("mode").value === "logger") { connectNow(); return; }
   if (!$("wssUrl").value && !$("espUrl").value) $("settings").open = true;
 }
 function saveSettings() {
-  for (const k of ["mode","wssUrl","user","topic","espUrl"]) store.set(k, $(k).value.trim());
+  for (const k of ["mode","wssUrl","user","topic","espUrl","loggerUrl"]) store.set(k, $(k).value.trim());
   if ($("remember").checked) store.set("pass", $("pass").value); else store.del("pass");
 }
 function applyMode() {
   const m = $("mode").value;
   document.querySelectorAll(".mqttOnly").forEach(e => e.style.display = m === "mqtt" ? "" : "none");
   document.querySelectorAll(".directOnly").forEach(e => e.style.display = m === "direct" ? "" : "none");
+  document.querySelectorAll(".loggerOnly").forEach(e => e.style.display = m === "logger" ? "" : "none");
 }
 $("mode").addEventListener("change", applyMode);
 
@@ -219,7 +237,8 @@ function handleLine(raw) {
   if (sessionLines.length > 200000) sessionLines.shift();
   if (history.length && d.ts_ms < history[history.length - 1].t) history.length = 0;  // reboot
   history.push({ t: d.ts_ms, spd: d.spd_x10 / 10, cur: d.current / 100 });  // ESP32 saati: ağ gecikmesi grafiği bozmasın
-  render(d);
+  lastParsed = d;
+  if (!bulk) render(d);   // geçmiş toplu yüklenirken her satırda DOM güncelleme yapma
 }
 
 function fmt(v, digits) { return Number.isFinite(v) ? v.toFixed(digits) : "--"; }
@@ -247,6 +266,7 @@ function setFlag(id, on, text) { const e = $(id); e.textContent = text; e.classN
 function handleStatus(s) {
   if (!s || typeof s !== "object") return;
   if (s.online === false) { $("espIp").textContent = "çevrimdışı"; return; }
+  if (s.sim === true) $("srcBadge").textContent = $("srcBadge").textContent.replace(/( · SAHTE VERİ \(S3 simülatör\))?$/, " · SAHTE VERİ (S3 simülatör)");
   $("espIp").textContent = s.ip || "--";
   $("espRssi").textContent = s.rssi || "--";
   if (Number.isFinite(s.uptimeMs)) $("espUp").textContent = Math.round(s.uptimeMs / 1000) + " s";
@@ -307,18 +327,73 @@ function connectDirect() {
   statusTimer = setInterval(status, 5000);
 }
 
+// ---- PC Logger (kalıcı kayıt; logger.py) ----
+// İlk bağlantıda oturumun TÜM kayıtlı satırları çekilir (geçmiş), sonra
+// 0,5 sn'de bir yalnız yenileri. Logger yeniden başlarsa run_id değişir → baştan.
+function connectLogger() {
+  let base = $("loggerUrl").value.trim().replace(/\/+$/, "");
+  if (!base) { setConn("Logger adresi eksik", "bad"); $("settings").open = true; return; }
+  if (!/^https?:\/\//.test(base)) base = "http://" + base;
+  $("srcBadge").textContent = "Logger · " + base;
+  setConn("Bağlanıyor…", "warn");
+  let busy = false, lastNo = 0, runId = null;
+  const poll = async () => {
+    if (busy) return; busy = true;
+    try {
+      for (let guard = 0; guard < 50; guard++) {          // geçmişi hızlı yakala
+        const r = await fetch(base + "/api/lines?limit=5000&since=" + lastNo, { cache: "no-store" });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const j = await r.json();
+        if (runId !== null && j.run_id !== runId) { lastNo = 0; lastSeq = null; lastTsMs = null; runId = j.run_id; continue; }
+        runId = j.run_id;
+        bulk = j.lines.length > 50;
+        for (const row of j.lines) { handleLine(row.line); lastNo = row.no; }
+        if (bulk && lastParsed) { bulk = false; render(lastParsed); }
+        bulk = false;
+        if (j.lines.length < 5000) break;
+      }
+    } catch (e) { setConn("Logger'a ulaşılamıyor (" + e.message + ")", "bad"); busy = false; return; }
+    busy = false;
+  };
+  const status = async () => {
+    try {
+      const r = await fetch(base + "/api/status", { cache: "no-store" });
+      if (!r.ok) return;
+      const s = await r.json();
+      handleStatus(s.esp_status);
+      $("logFile").textContent = s.file;
+      $("logSrc").textContent = s.source.kind + " · " + s.source.detail;
+      setConn(s.source.connected ? "Logger + kaynak bağlı" : "Logger bağlı · kaynak YOK", s.source.connected ? "ok" : "warn");
+      const l = await (await fetch(base + "/api/logs", { cache: "no-store" })).json();
+      const box = $("logList"); box.textContent = "";
+      l.files.filter(f => f.name.endsWith(".csv")).slice(-20).reverse().forEach(f => {
+        const a = document.createElement("a");
+        a.href = base + "/logs/" + encodeURIComponent(f.name);
+        a.textContent = f.name + " (" + Math.round(f.bytes / 1024) + " KB)" + (f.name === l.current ? " ← şu an" : "");
+        a.style.color = "var(--accent)";
+        const span = document.createElement("span"); span.appendChild(a); box.appendChild(span);
+      });
+    } catch {}
+  };
+  poll(); status();
+  pollTimer = setInterval(poll, 500);
+  statusTimer = setInterval(status, 3000);
+}
+
 function disconnect() {
   if (client) { const c = client; client = null; c.end(true); }
   clearInterval(pollTimer); clearInterval(statusTimer); pollTimer = statusTimer = null;
   setConn("Bağlı değil", "bad"); $("srcBadge").textContent = "—";
 }
 
-$("connectBtn").addEventListener("click", () => {
+function connectNow() {
   disconnect(); saveSettings();
   lastSeq = null; lastTsMs = null;
-  ($("mode").value === "mqtt" ? connectMqtt : connectDirect)();
+  const m = $("mode").value;
+  (m === "mqtt" ? connectMqtt : m === "logger" ? connectLogger : connectDirect)();
   $("settings").open = false;
-});
+}
+$("connectBtn").addEventListener("click", connectNow);
 $("disconnectBtn").addEventListener("click", disconnect);
 $("downloadBtn").addEventListener("click", () => {
   const header = "pc_time," + FIELDS.join(",") + "\n";
